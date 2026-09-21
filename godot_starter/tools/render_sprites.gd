@@ -17,18 +17,30 @@ const SS := 4                 # render 4x bigger, then shrink = smooth edges
 const OUT_DIR := "res://assets/sprites/"
 const OUTLINE := Color(0.13, 0.1, 0.09)
 
-# name: [builder, view height in world units (1 unit = hex radius), output px, yaw]
+# name: [builder, view height in world units, output px, yaw, (optional) ground anchor]
+# Map sprites use 1 unit = hex radius. City-view sprites (b_*) use 1 unit = radius of the city board.
 var JOBS := {
-	"settler":  ["_colonist", 3.0, 160, 22.0],
-	"scout":    ["_scout",    3.0, 160, 22.0],
-	"guard":    ["_guard",    3.0, 160, 22.0],
-	"worker":   ["_worker",   3.0, 160, 22.0],
-	"tree_pine": ["_tree_pine", 1.3, 96, 0.0],
-	"tree_leaf": ["_tree_leaf", 1.3, 96, 0.0],
-	"hill":     ["_hill",     2.2, 160, 0.0],
-	"mountain": ["_mountain", 2.6, 192, 0.0],
-	"city":     ["_city",     2.4, 192, 0.0],
-	"village":  ["_village",  2.2, 160, 0.0],
+	"settler":  ["_colonist", 3.0, 256, 22.0],
+	"scout":    ["_scout",    3.0, 256, 22.0],
+	"guard":    ["_guard",    3.0, 256, 22.0],
+	"worker":   ["_worker",   3.0, 256, 22.0],
+	"tree_pine": ["_tree_pine", 1.3, 128, 0.0],
+	"tree_leaf": ["_tree_leaf", 1.3, 128, 0.0],
+	"hill":     ["_hill",     2.2, 224, 0.0],
+	"mountain": ["_mountain", 2.6, 288, 0.0],
+	"city":     ["_city",     2.4, 320, 0.0],
+	"village":  ["_village",  2.2, 256, 0.0],
+	# ---- city view (Lesson 10f) ----
+	"b_plate":    ["_b_plate",    2.3, 1024, 0.0, 0.5],
+	"b_townhall": ["_b_townhall", 0.8, 384, -12.0],
+	"b_granary":  ["_b_granary",  0.8, 384, -12.0],
+	"b_workshop": ["_b_workshop", 0.8, 384, -12.0],
+	"b_market":   ["_b_market",   0.8, 384, -12.0],
+	"b_school":   ["_b_school",   0.8, 384, -12.0],
+	"b_scaffold": ["_b_scaffold", 0.8, 384, -12.0],
+	"b_plot":     ["_b_plot",     0.8, 384, -12.0],
+	"b_house_a":  ["_b_house_a",  0.45, 224, -12.0],
+	"b_house_b":  ["_b_house_b",  0.45, 224, 18.0],
 }
 
 # Palette (sRGB)
@@ -108,10 +120,11 @@ func _render(sprite_name: String) -> void:
 	var px: int = job[2]
 	vp.size = Vector2i(px * SS, px * SS)
 	cam.size = view
+	var anchor: float = job[4] if job.size() > 4 else ANCHOR_Y
 	var th := deg_to_rad(PITCH)
 	var up := Vector3(0, cos(th), -sin(th))
 	var fwd := Vector3(0, -sin(th), -cos(th))
-	var look := up * ((ANCHOR_Y - 0.5) * view)
+	var look := up * ((anchor - 0.5) * view)
 	cam.look_at_from_position(look - fwd * 30.0, look, Vector3.UP)
 	await _frames(3)
 	var img := vp.get_texture().get_image()
@@ -158,13 +171,14 @@ func _finish(img: Image, px: int, outline: bool) -> Image:
 	img.resize(px, px, Image.INTERPOLATE_LANCZOS)
 	if not outline:
 		return img
-	# Dark 1px outline behind the art (dilate the alpha) — keeps sprites readable on any terrain
+	# Dark outline behind the art (dilate the alpha) — keeps sprites readable on any terrain
+	var rad := 2 if px >= 200 else 1
 	var out := Image.create(px, px, false, Image.FORMAT_RGBA8)
 	for y in px:
 		for x in px:
 			var a := 0.0
-			for dy in range(-1, 2):
-				for dx in range(-1, 2):
+			for dy in range(-rad, rad + 1):
+				for dx in range(-rad, rad + 1):
 					var xx := clampi(x + dx, 0, px - 1)
 					var yy := clampi(y + dy, 0, px - 1)
 					a = maxf(a, img.get_pixel(xx, yy).a)
@@ -503,3 +517,197 @@ func _village() -> void:
 	for i in 7:
 		var a := TAU * i / 7.0
 		add(sphere(0.035, 6), Color(0.5, 0.48, 0.45), Vector3(-0.02 + cos(a) * 0.11, 0.02, 0.42 + sin(a) * 0.08))
+
+
+# =============================================================
+#  City view (Lesson 10f): the board and its buildings.
+#  1 unit = radius of the hexagonal city board; buildings stand on y = 0.
+# =============================================================
+const STONE := Color(0.64, 0.62, 0.58)
+const PLASTER := Color(0.93, 0.89, 0.8)
+const GLASS := Color(0.55, 0.7, 0.85)
+const DARK_WOOD := Color(0.3, 0.2, 0.12)
+
+
+# A pitched roof whose ridge runs left-right (along X)
+func _roof(pos: Vector3, w: float, d: float, h: float, col, team := false) -> void:
+	var p := PrismMesh.new()
+	p.size = Vector3(d, h, w)
+	add(p, col, pos + Vector3(0, h * 0.5, 0), Vector3(0, 90, 0), Vector3.ONE, team)
+
+
+func _windows(y: float, z: float, xs: Array, s := 0.045) -> void:
+	for x in xs:
+		add(box(s, s * 1.1, 0.008), GLASS, Vector3(x, y, z))
+		add(box(s + 0.012, 0.008, 0.012), PLASTER.darkened(0.2), Vector3(x, y - s * 0.6, z))
+
+
+func _b_plate() -> void:
+	add(cyl(0.97, 0.99, 0.18, 6), Color(0.47, 0.35, 0.22), Vector3(0, -0.01, 0), Vector3(0, 30, 0))
+	add(cyl(1.0, 1.0, 0.03, 6), Color(0.43, 0.62, 0.3), Vector3(0, 0.085, 0), Vector3(0, 30, 0))
+	# cobbled plaza, paths to the gate and to the town hall, a well in the middle
+	add(cyl(0.25, 0.25, 0.012, 40), Color(0.67, 0.64, 0.58), Vector3(0, 0.106, 0.02))
+	add(box(0.13, 0.008, 0.62), Color(0.63, 0.5, 0.33), Vector3(0, 0.104, 0.56))
+	add(box(0.12, 0.008, 0.22), Color(0.63, 0.5, 0.33), Vector3(0, 0.104, -0.3))
+	add(cyl(0.05, 0.056, 0.05, 20), STONE, Vector3(0, 0.126, 0.02))
+	add(cyl(0.036, 0.036, 0.053, 20), Color(0.18, 0.28, 0.38), Vector3(0, 0.128, 0.02))
+	for sx in [-1.0, 1.0]:
+		rod(Vector3(0.04 * sx, 0.12, 0.02), Vector3(0.04 * sx, 0.22, 0.02), 0.006, DARK_WOOD)
+	_roof(Vector3(0, 0.215, 0.02), 0.12, 0.08, 0.04, Color(0.45, 0.3, 0.2))
+	# low stone wall with a gate at the front
+	for k in 6:
+		var th := deg_to_rad(30.0 + 60.0 * k)
+		var nrm := Vector3(cos(th), 0, sin(th))
+		var tng := Vector3(-sin(th), 0, cos(th))
+		var mid := nrm * 0.866 * 0.95 + Vector3(0, 0.125, 0)
+		var rot := Vector3(0, -rad_to_deg(th) - 90.0, 0)
+		if k == 1:
+			for sgn in [-1.0, 1.0]:
+				add(box(0.34, 0.05, 0.05), STONE, mid + tng * 0.3 * sgn, rot)
+				add(cyl(0.035, 0.035, 0.11, 12), STONE.darkened(0.08), mid + tng * 0.12 * sgn + Vector3(0, 0.03, 0))
+		else:
+			add(box(0.93, 0.05, 0.05), STONE, mid, rot)
+	# a few flower beds around the plaza
+	for a in [40.0, 140.0, 220.0, 320.0]:
+		var p := Vector3(cos(deg_to_rad(a)) * 0.3, 0.11, sin(deg_to_rad(a)) * 0.3 + 0.02)
+		add(sphere(0.03, 8), Color(0.25, 0.48, 0.22), p, Vector3.ZERO, Vector3(1.4, 0.6, 1.0))
+		add(sphere(0.012, 6), Color(0.95, 0.55, 0.6) if a < 180.0 else Color(0.98, 0.85, 0.35), p + Vector3(0.01, 0.018, 0.01))
+
+
+func _b_townhall() -> void:
+	add(box(0.46, 0.035, 0.32), STONE, Vector3(0, 0.0175, 0))                  # plinth
+	add(box(0.44, 0.22, 0.28), PLASTER, Vector3(0, 0.145, 0))
+	_roof(Vector3(0, 0.255, 0), 0.5, 0.33, 0.14, TEAM, true)
+	# portico with columns and steps
+	for x in [-0.07, -0.025, 0.025, 0.07]:
+		add(cyl(0.011, 0.011, 0.15, 10), Color(0.97, 0.96, 0.92), Vector3(x, 0.11, 0.165))
+	add(box(0.19, 0.02, 0.06), PLASTER, Vector3(0, 0.195, 0.165))
+	var ped := PrismMesh.new()
+	ped.size = Vector3(0.2, 0.05, 0.06)
+	add(ped, PLASTER.darkened(0.05), Vector3(0, 0.23, 0.165))
+	add(box(0.2, 0.02, 0.08), STONE, Vector3(0, 0.01, 0.2))
+	add(box(0.06, 0.09, 0.01), DARK_WOOD, Vector3(0, 0.08, 0.142))
+	_windows(0.13, 0.142, [-0.17, -0.12, 0.12, 0.17])
+	_windows(0.215, 0.142, [-0.17, 0.17], 0.035)
+	# clock tower
+	add(box(0.11, 0.2, 0.11), PLASTER, Vector3(0, 0.39, 0.0))
+	add(cyl(0.0, 0.1, 0.13, 4), TEAM, Vector3(0, 0.555, 0), Vector3(0, 45, 0), Vector3.ONE, true)
+	add(cyl(0.032, 0.032, 0.008, 20), Color(0.98, 0.97, 0.9), Vector3(0, 0.42, 0.057), Vector3(90, 0, 0))
+	add(box(0.004, 0.024, 0.004), EYE, Vector3(0, 0.428, 0.062))
+	add(box(0.018, 0.004, 0.004), EYE, Vector3(0.007, 0.42, 0.062))
+	# flag
+	rod(Vector3(0.2, 0.26, 0.0), Vector3(0.2, 0.52, 0.0), 0.005, DARK_WOOD)
+	add(box(0.1, 0.06, 0.006), TEAM, Vector3(0.25, 0.48, 0.0), Vector3.ZERO, Vector3.ONE, true)
+
+
+func _b_house(wall: Color, roof: Color) -> void:
+	add(box(0.17, 0.11, 0.14), wall, Vector3(0, 0.055, 0))
+	_roof(Vector3(0, 0.11, 0), 0.2, 0.17, 0.08, roof)
+	add(box(0.035, 0.06, 0.006), DARK_WOOD, Vector3(-0.03, 0.03, 0.072))
+	add(box(0.03, 0.03, 0.006), GLASS, Vector3(0.04, 0.065, 0.072))
+	add(box(0.028, 0.07, 0.028), Color(0.55, 0.3, 0.22), Vector3(0.05, 0.19, -0.03))
+
+
+func _b_house_a() -> void:
+	_b_house(PLASTER, Color(0.72, 0.32, 0.22))
+
+
+func _b_house_b() -> void:
+	_b_house(Color(0.64, 0.47, 0.31), Color(0.36, 0.39, 0.44))
+
+
+func _b_granary() -> void:
+	# red barn + stone silo with a team-coloured cap + hay bales
+	add(box(0.26, 0.16, 0.2), Color(0.62, 0.25, 0.2), Vector3(-0.05, 0.08, 0))
+	_roof(Vector3(-0.05, 0.16, 0), 0.29, 0.23, 0.1, Color(0.36, 0.26, 0.18))
+	add(box(0.09, 0.11, 0.006), PLASTER, Vector3(-0.05, 0.055, 0.101))
+	add(box(0.075, 0.1, 0.008), Color(0.5, 0.2, 0.16), Vector3(-0.05, 0.05, 0.104))
+	add(box(0.004, 0.13, 0.009), PLASTER, Vector3(-0.05, 0.05, 0.106), Vector3(0, 0, 38))
+	add(cyl(0.075, 0.075, 0.3, 24), STONE, Vector3(0.15, 0.15, -0.02))
+	for y in [0.08, 0.16, 0.24]:
+		add(cyl(0.078, 0.078, 0.008, 24), STONE.darkened(0.15), Vector3(0.15, y, -0.02))
+	add(cyl(0.0, 0.088, 0.09, 24), TEAM, Vector3(0.15, 0.345, -0.02), Vector3.ZERO, Vector3.ONE, true)
+	for p in [Vector3(-0.15, 0.03, 0.15), Vector3(-0.07, 0.03, 0.16), Vector3(-0.11, 0.085, 0.155)]:
+		add(cyl(0.032, 0.032, 0.07, 14), STRAW, p, Vector3(0, 0, 90))
+	add(sphere(0.025, 10), Color(0.8, 0.7, 0.5), Vector3(0.05, 0.022, 0.13), Vector3.ZERO, Vector3(1, 1.2, 1))
+
+
+func _b_workshop() -> void:
+	add(box(0.28, 0.16, 0.2), Color(0.6, 0.58, 0.54), Vector3(0, 0.08, 0))
+	_roof(Vector3(0, 0.16, 0), 0.31, 0.23, 0.09, TEAM, true)
+	add(box(0.05, 0.16, 0.05), Color(0.55, 0.3, 0.22), Vector3(0.09, 0.26, -0.04))
+	for i in 3:   # smoke
+		add(sphere(0.022 + i * 0.01, 10), Color(0.8, 0.8, 0.82), Vector3(0.1 + i * 0.02, 0.36 + i * 0.05, -0.05))
+	# glowing forge door
+	add(box(0.09, 0.1, 0.006), mat(Color(1.0, 0.55, 0.15), 0.9, 0.0, true), Vector3(-0.05, 0.05, 0.101))
+	add(box(0.11, 0.012, 0.012), DARK_WOOD, Vector3(-0.05, 0.106, 0.104))
+	_windows(0.1, 0.102, [0.07])
+	# anvil + log pile
+	add(box(0.03, 0.03, 0.03), DARK_WOOD, Vector3(-0.14, 0.015, 0.16))
+	add(box(0.06, 0.02, 0.028), Color(0.25, 0.25, 0.28), Vector3(-0.14, 0.04, 0.16))
+	for p in [Vector3(0.1, 0.02, 0.15), Vector3(0.14, 0.02, 0.15), Vector3(0.12, 0.052, 0.15)]:
+		add(cyl(0.02, 0.02, 0.12, 12), WOOD, p, Vector3(90, 0, 0))
+
+
+func _stall(p: Vector3, goods: Array) -> void:
+	add(box(0.12, 0.045, 0.07), WOOD, p + Vector3(0, 0.045, 0))
+	for c in [Vector3(-0.055, 0, -0.03), Vector3(0.055, 0, -0.03), Vector3(-0.055, 0, 0.03), Vector3(0.055, 0, 0.03)]:
+		rod(p + c, p + c + Vector3(0, 0.15, 0), 0.005, DARK_WOOD)
+	# striped awning: team colour with cream stripes
+	var aw := p + Vector3(0, 0.16, 0)
+	add(box(0.14, 0.008, 0.1), TEAM, aw, Vector3(-14, 0, 0), Vector3.ONE, true)
+	for x in [-0.035, 0.035]:
+		add(box(0.022, 0.01, 0.1), CREAM, aw + Vector3(x, 0.001, 0), Vector3(-14, 0, 0))
+	for i in goods.size():
+		add(sphere(0.016, 8), goods[i], p + Vector3(-0.035 + i * 0.035, 0.08, 0.01))
+
+
+func _b_market() -> void:
+	_stall(Vector3(-0.13, 0, -0.04), [Color(0.85, 0.2, 0.15), Color(0.95, 0.6, 0.15), Color(0.5, 0.75, 0.25)])
+	_stall(Vector3(0.13, 0, -0.04), [Color(0.95, 0.85, 0.4), Color(0.6, 0.35, 0.2), Color(0.85, 0.2, 0.15)])
+	_stall(Vector3(0.0, 0, 0.12), [Color(0.5, 0.75, 0.25), Color(0.95, 0.85, 0.4), Color(0.95, 0.6, 0.15)])
+	for p in [Vector3(-0.2, 0.025, 0.12), Vector3(0.2, 0.025, 0.1)]:
+		add(cyl(0.025, 0.028, 0.05, 12), WOOD, p)
+	add(box(0.05, 0.05, 0.05), WOOD.lightened(0.1), Vector3(-0.2, 0.025, 0.05))
+	add(box(0.04, 0.04, 0.04), WOOD, Vector3(-0.2, 0.07, 0.05))
+
+
+func _b_school() -> void:
+	add(box(0.3, 0.17, 0.2), Color(0.95, 0.94, 0.9), Vector3(0, 0.085, 0))
+	_roof(Vector3(0, 0.17, 0), 0.33, 0.23, 0.1, TEAM, true)
+	add(box(0.07, 0.09, 0.07), Color(0.95, 0.94, 0.9), Vector3(0, 0.31, 0))
+	add(cyl(0.0, 0.065, 0.1, 4), TEAM, Vector3(0, 0.405, 0), Vector3(0, 45, 0), Vector3.ONE, true)
+	add(sphere(0.018, 10), BRASS, Vector3(0, 0.3, 0.02))
+	add(box(0.05, 0.09, 0.006), DARK_WOOD, Vector3(0, 0.045, 0.101))
+	_windows(0.1, 0.102, [-0.1, -0.05, 0.05, 0.1])
+	# picket fence
+	for i in 9:
+		add(box(0.008, 0.04, 0.008), Color(0.97, 0.97, 0.95), Vector3(-0.16 + i * 0.04, 0.02, 0.16))
+	add(box(0.33, 0.008, 0.006), Color(0.97, 0.97, 0.95), Vector3(0, 0.03, 0.16))
+
+
+func _b_scaffold() -> void:
+	# a half-built frame: posts, beams, planks, bricks
+	add(box(0.24, 0.07, 0.18), PLASTER.darkened(0.08), Vector3(0, 0.035, 0))
+	for c in [Vector3(-0.13, 0, -0.1), Vector3(0.13, 0, -0.1), Vector3(-0.13, 0, 0.1), Vector3(0.13, 0, 0.1)]:
+		rod(c, c + Vector3(0, 0.24, 0), 0.007, WOOD)
+	for y in [0.12, 0.24]:
+		rod(Vector3(-0.13, y, 0.1), Vector3(0.13, y, 0.1), 0.006, WOOD)
+		rod(Vector3(-0.13, y, -0.1), Vector3(0.13, y, -0.1), 0.006, WOOD)
+		rod(Vector3(0.13, y, -0.1), Vector3(0.13, y, 0.1), 0.006, WOOD)
+	rod(Vector3(-0.13, 0.0, 0.1), Vector3(0.13, 0.24, 0.1), 0.005, WOOD.darkened(0.1))
+	add(box(0.28, 0.01, 0.05), WOOD.lightened(0.1), Vector3(0, 0.125, 0.125))
+	for i in 3:
+		add(box(0.1, 0.012, 0.03), WOOD.lightened(0.15), Vector3(0.2, 0.006 + i * 0.013, 0.14))
+	for i in 4:
+		add(box(0.03, 0.02, 0.018), Color(0.7, 0.35, 0.25), Vector3(-0.2 + (i % 2) * 0.032, 0.01 + (i / 2) * 0.021, 0.15))
+
+
+func _b_plot() -> void:
+	add(box(0.28, 0.01, 0.22), Color(0.55, 0.42, 0.27), Vector3(0, 0.005, 0))
+	var corners := [Vector3(-0.13, 0, -0.1), Vector3(0.13, 0, -0.1), Vector3(0.13, 0, 0.1), Vector3(-0.13, 0, 0.1)]
+	for i in 4:
+		var c: Vector3 = corners[i]
+		rod(c, c + Vector3(0, 0.06, 0), 0.006, WOOD)
+		var n: Vector3 = corners[(i + 1) % 4]
+		rod(c + Vector3(0, 0.05, 0), n + Vector3(0, 0.05, 0), 0.002, CREAM)

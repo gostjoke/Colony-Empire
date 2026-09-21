@@ -11,10 +11,15 @@ extends Node2D
 #  Lesson 10b: unit sprites tinted with each nation's colour; new Scout unit.
 #  Lesson 10c: 2.5D — tilted map with raised hex prisms, depth-sorted
 #  pre-rendered 3D sprites (tools/render_sprites.gd), elevation-aware picking.
+#  Lesson 10d: real UI made of Control nodes lives in hud.gd.
+#  Lesson 10e: title screen + new-game setup (nation, map size, rivals),
+#  settings (fullscreen, UI size), sharper high-resolution rendering.
+#  Lesson 10f: city view — double-click a city / press C (hud.gd).
 # =============================================================
 
-const MAP_W := 70                 # columns (offset layout, odd rows shifted right)
-const MAP_H := 44                 # rows
+# Map size and game setup are chosen on the title screen (see MAP_SIZES / start_game)
+var MAP_W := 70                   # columns (offset layout, odd rows shifted right)
+var MAP_H := 44                   # rows
 const HEX := 32.0                 # hex radius in px (center -> corner)
 const SQ3 := 1.7320508
 const NO_CELL := Vector2i(9999, 9999)
@@ -28,8 +33,15 @@ const PAN_SPEED := 700.0
 const CITY_MIN_DIST := 4          # cities must be at least 4 hexes apart
 const FOOD_PER_POP := 2
 
-const PLAYER_NATION := 0          # index into NATIONS — change to 1-3 to play another country
-const AI_COUNT := 2               # rival colonial powers (max 3)
+var PLAYER_NATION := 0            # index into NATIONS (picked on the setup screen)
+var AI_COUNT := 2                 # rival colonial powers (1-3)
+var TRIBE_COUNT := 4              # native tribes on the map (max TRIBES.size())
+
+const MAP_SIZES := {
+	"small":    { "name": "Small",    "w": 50, "h": 32, "ai": 1, "tribes": 3, "villages": 4 },
+	"standard": { "name": "Standard", "w": 70, "h": 44, "ai": 2, "tribes": 4, "villages": 5 },
+	"large":    { "name": "Large",    "w": 92, "h": 58, "ai": 3, "tribes": 4, "villages": 7 },
+}
 
 # Axial neighbour directions. Index i = the edge between CORNERS[i] and CORNERS[i+1].
 const DIRS := [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 1),
@@ -73,7 +85,7 @@ const TRIBES := [
 	{ "name": "Forest Nation",      "col": Color(0.93, 0.93, 0.88) },
 	{ "name": "Plains Confederacy", "col": Color(0.85, 0.22, 0.30) },
 ]
-const VILLAGES_PER_TRIBE := 5
+var VILLAGES_PER_TRIBE := 5
 const TRIBE_START_ATT := 10
 const TRADE_ATT := 20             # attitude needed before a tribe trades with you
 const TRADE_RANGE := 6            # ...and one of your cities must be this close to the village
@@ -176,6 +188,12 @@ var labels := []         # city name plates, collected while drawing and painted
 var tile_cols := {}      # hex -> PackedColorArray of its lit top-face corner colours (cached)
 var corner_off := PackedVector2Array()   # the 6 corner offsets at the current zoom (per frame)
 var view_sig := []       # what the last frame showed; redraw only when this changes
+var hud                  # hud.gd — all panels and buttons
+var map_font: Font       # font for text drawn on the map (city names, path turns)
+var in_menu := true      # title screen: the map is only a moving backdrop
+var menu_dir := 1.0
+var fullscreen := false  # settings (saved in user://settings.cfg)
+var ui_scale := 1.0
 
 var message := ""
 var message_timer := 0.0
@@ -186,8 +204,85 @@ var game_over := false
 
 func _ready() -> void:
 	randomize()
+	map_font = load("res://assets/fonts/AlegreyaSans-Bold.ttf")
+	hud = load("res://hud.gd").new()
+	hud.game = self
+	add_child(hud)
 	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS   # sprites stay smooth when zoomed out
+	_load_settings()
+	go_to_menu()
+
+
+# ---------- Title screen / new game / settings ----------
+# The title screen shows a random, fully explored map slowly drifting behind the menu.
+func go_to_menu() -> void:
+	in_menu = true
+	game_over = false
+	show_diplo = false
+	_deselect()
+	map_seed = randi()
+	MAP_W = 70; MAP_H = 44; TRIBE_COUNT = 4; VILLAGES_PER_TRIBE = 5
+	chopped.clear(); roads.clear(); improvements.clear(); territory.clear(); in_sight.clear(); seen.clear()
+	cities.clear(); city_at.clear(); city_index.clear(); units.clear(); nations.clear()
+	tribes.clear(); villages.clear(); village_at.clear(); tribe_land.clear()
+	for d in 3:
+		nations.append(_new_nation(d))
+	_generate_terrain()
+	_place_tribes([])
+	for c in terrain.keys():
+		seen[c] = true
+	zoom = 1.0
+	_center_on(offset_to_axial(MAP_W / 2, MAP_H / 2))
+	if hud != null:
+		hud.show_menu()
+	queue_redraw()
+
+
+func start_game(nation_def: int, size_key: String, rivals: int) -> void:
+	var s: Dictionary = MAP_SIZES[size_key]
+	MAP_W = s["w"]
+	MAP_H = s["h"]
+	TRIBE_COUNT = s["tribes"]
+	VILLAGES_PER_TRIBE = s["villages"]
+	PLAYER_NATION = nation_def
+	AI_COUNT = clampi(rivals, 1, NATIONS.size() - 1)
+	in_menu = false
+	if hud != null:
+		hud.show_game()
 	_restart()
+
+
+func continue_game() -> void:
+	in_menu = false
+	if hud != null:
+		hud.show_game()
+	_load_game()
+
+
+func _load_settings() -> void:
+	var cf := ConfigFile.new()
+	if cf.load("user://settings.cfg") == OK:
+		fullscreen = cf.get_value("display", "fullscreen", false)
+		ui_scale = cf.get_value("display", "ui_scale", 1.0)
+	apply_settings()
+
+
+func save_settings() -> void:
+	var cf := ConfigFile.new()
+	cf.set_value("display", "fullscreen", fullscreen)
+	cf.set_value("display", "ui_scale", ui_scale)
+	cf.save("user://settings.cfg")
+
+
+# The game is laid out for 1600x900 and scaled to the real window with stretch mode
+# "canvas_items", so it is drawn sharply at the screen's full resolution.
+# ui_scale enlarges / shrinks everything on top of that.
+func apply_settings() -> void:
+	get_window().content_scale_factor = ui_scale
+	var want := DisplayServer.WINDOW_MODE_FULLSCREEN if fullscreen else DisplayServer.WINDOW_MODE_MAXIMIZED
+	var now := DisplayServer.window_get_mode()
+	if fullscreen != (now == DisplayServer.WINDOW_MODE_FULLSCREEN or now == DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN):
+		DisplayServer.window_set_mode(want)
 
 
 # ---------- Nation helpers ----------
@@ -409,7 +504,7 @@ func _place_tribes(starts: Array) -> void:
 	land.shuffle()
 	var homes := []
 	var vcells := []
-	for t in TRIBES.size():
+	for t in mini(TRIBE_COUNT, TRIBES.size()):
 		var att := []
 		for n in nations.size():
 			att.append(TRIBE_START_ATT + (20 if has_trait(n, "diplomacy") else 0))
@@ -552,26 +647,34 @@ func _reveal(c: Vector2i, n: int) -> void:
 		seen[h] = true
 
 
-func _start_job(u: Dictionary, job: String) -> bool:
+# Why a worker can't do this job here ("" = it can). Also used by the HUD to grey out buttons.
+func _job_problem(u: Dictionary, job: String) -> String:
 	if u["type"] != "worker":
-		return false
+		return "Only workers can do that"
 	var c: Vector2i = u["cell"]
 	var t: String = terrain[c]
 	var spec: Dictionary = JOBS[job]
-	var why := ""
 	if city_at.has(c):
-		why = "Not on a city tile"
-	elif not (t in spec["on"]):
-		why = "Can't %s on %s" % [job, TERRAIN[t]["name"]]
-	elif (job == "road" and roads.has(c)) or improvements.get(c, "") == job:
-		why = "Already done here"
-	elif territory.has(c) and _cell_nation(c) != u["owner"]:
-		why = "That is foreign land"
-	elif tribe_land.has(c) and job != "road":
-		why = "That land belongs to the %s" % TRIBES[tribe_land[c]]["name"]
+		return "Not on a city tile"
+	if not (t in spec["on"]):
+		return "Can't %s on %s" % [job, TERRAIN[t]["name"]]
+	if (job == "road" and roads.has(c)) or improvements.get(c, "") == job:
+		return "Already done here"
+	if territory.has(c) and _cell_nation(c) != u["owner"]:
+		return "That is foreign land"
+	if tribe_land.has(c) and job != "road":
+		return "That land belongs to the %s" % TRIBES[tribe_land[c]]["name"]
+	return ""
+
+
+func _start_job(u: Dictionary, job: String) -> bool:
+	if u["type"] != "worker":
+		return false
+	var why := _job_problem(u, job)
 	if why != "":
 		if u["owner"] == 0: _show_message(why)
 		return false
+	var spec: Dictionary = JOBS[job]
 	var turns: int = spec["turns"]
 	if nations[u["owner"]]["tech"]["iron_tools"]:
 		turns = maxi(1, turns - 1)
@@ -1339,13 +1442,24 @@ func _show_if_offscreen(c: Vector2i) -> void:
 
 
 func _set_zoom(nz: float) -> void:
-	nz = clampf(nz, 0.4, 2.0)
+	nz = clampf(nz, 0.4, 2.5)
 	var focus := get_global_mouse_position()
 	origin = focus - (focus - origin) / zoom * nz
 	zoom = nz
 
 
 func _process(delta: float) -> void:
+	if in_menu:
+		# title screen: drift slowly left/right across the map
+		origin.x -= menu_dir * 16.0 * delta
+		var vp := get_viewport_rect().size
+		if _flat(hex_to_world(offset_to_axial(MAP_W - 1, 0))).x < vp.x - 40:
+			menu_dir = -1.0
+		elif _flat(hex_to_world(offset_to_axial(0, 0))).x > 40:
+			menu_dir = 1.0
+		hovered = NO_CELL
+		queue_redraw()
+		return
 	var pan := Vector2.ZERO
 	if Input.is_key_pressed(KEY_LEFT):  pan.x += 1
 	if Input.is_key_pressed(KEY_RIGHT): pan.x -= 1
@@ -1354,7 +1468,10 @@ func _process(delta: float) -> void:
 	if pan != Vector2.ZERO:
 		origin += pan * PAN_SPEED * delta
 
-	hovered = screen_to_hex(get_global_mouse_position())
+	if get_viewport().gui_get_hovered_control() != null:
+		hovered = NO_CELL          # the mouse is over a panel, not the map
+	else:
+		hovered = screen_to_hex(get_global_mouse_position())
 	var moving := false
 	for u in units:   # slide unit figures smoothly toward their hex
 		var target := hex_to_world(u["cell"])
@@ -1376,10 +1493,21 @@ func _process(delta: float) -> void:
 	if moving or sig != view_sig:
 		view_sig = sig
 		queue_redraw()
+		if hud != null:
+			hud.refresh()
 
 
 # ---------- Input ----------
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F11:
+		fullscreen = not fullscreen
+		apply_settings()
+		save_settings()
+		return
+	if in_menu:
+		if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE and hud != null:
+			hud.show_page("main")
+		return
 	if not event is InputEventMouseMotion:
 		queue_redraw()      # any key / click may change what's shown
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -1390,17 +1518,29 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.button_index:
 			MOUSE_BUTTON_WHEEL_UP: _set_zoom(zoom * 1.1)
 			MOUSE_BUTTON_WHEEL_DOWN: _set_zoom(zoom / 1.1)
-			MOUSE_BUTTON_LEFT: _left_click(hovered)
+			MOUSE_BUTTON_LEFT:
+				if event.double_click and city_at.has(hovered) and city_at[hovered]["owner"] == 0 and hud != null:
+					_select(city_at[hovered])       # double-click your city = open the city view
+					hud.open_city_view()
+				else:
+					_left_click(hovered)
 			MOUSE_BUTTON_RIGHT: _right_click(hovered)
+	if hud != null and not event is InputEventMouseMotion:
+		hud.refresh()
 
 
 func _on_key(k: int) -> void:
+	if in_menu:
+		return
 	match k:
 		KEY_F5: _save_game(); return
 		KEY_F9: _load_game(); return
 		KEY_F2: _restart(); return
 		KEY_D: show_diplo = not show_diplo; return
-		KEY_ESCAPE: show_diplo = false; _deselect(); return
+		KEY_ESCAPE:
+			if hud == null or not hud.close_windows():
+				_deselect()
+			return
 	if game_over:
 		return
 	match k:
@@ -1448,6 +1588,8 @@ func _city_key(k: int) -> void:
 		_show_message("%s is now building: %s" % [city["name"], _item_name(item)])
 	elif k == KEY_G:
 		_buy(city)
+	elif k == KEY_C and hud != null:
+		hud.open_city_view()
 
 
 func _left_click(cell: Vector2i) -> void:
@@ -1525,10 +1667,13 @@ func _restart() -> void:
 		_spawn_unit("worker", starts[n], n)
 	for n in range(1, nations.size()):
 		_ai_turn(n)          # AI colonies found their first city right away
+	zoom = 1.15
 	_center_on(starts[0])
 	_deselect()
 	_recompute_vision()
 	_select_next_unit()
+	if hud != null:
+		hud.on_new_game()
 	_show_message("%s's ships reach the New World.  Press B with the Colonist to found a city" % ndef(0)["name"])
 
 
@@ -1546,6 +1691,7 @@ func _v(a) -> Vector2i:
 func _save_game() -> void:
 	var data := {
 		"seed": map_seed, "turn": turn, "next_id": next_id, "nations": nations, "tribes": tribes,
+		"map_w": MAP_W, "map_h": MAP_H,
 		"chopped": _cells(chopped.keys()), "roads": _cells(roads.keys()), "seen": _cells(seen.keys()),
 		"improvements": [], "territory": [], "tribe_land": [], "villages": [], "cities": [], "units": [],
 	}
@@ -1585,6 +1731,7 @@ func _load_game() -> void:
 	if typeof(data) != TYPE_DICTIONARY:
 		_show_message("Save file corrupted"); return
 	map_seed = int(data["seed"]); turn = int(data["turn"]); next_id = int(data["next_id"])
+	MAP_W = int(data.get("map_w", 70)); MAP_H = int(data.get("map_h", 44))
 	nations.clear()
 	for d in data["nations"]:
 		var nat: Dictionary = d
@@ -1641,15 +1788,21 @@ func _load_game() -> void:
 	var mine := cities.filter(func(c): return c["owner"] == 0)
 	if not mine.is_empty(): _center_on(mine[0]["cell"])
 	_select_next_unit()
+	if hud != null:
+		hud.on_new_game()
 	_show_message("Loaded — year %d" % year())
 
 
 func _show_message(text: String) -> void:
 	message = text; message_timer = 3.0
+	if hud != null:
+		hud.show_toast(text)
 
 
 func _show_event(text: String) -> void:
 	event_text = text; event_timer = 4.0
+	if hud != null:
+		hud.push_event(text)
 
 
 # ---------- Drawing (2.5D) ----------
@@ -1756,7 +1909,7 @@ func _unit_groups() -> Dictionary:
 func _draw() -> void:
 	var vp := get_viewport_rect().size
 	var r := HEX * zoom
-	var font := ThemeDB.fallback_font
+	var font: Font = map_font if map_font != null else ThemeDB.fallback_font
 	corner_off = _hex_points(Vector2.ZERO, r)
 	draw_rect(Rect2(Vector2.ZERO, vp), Color(0.04, 0.04, 0.06))   # background beyond the map edge
 	var groups := _unit_groups()
@@ -1793,9 +1946,6 @@ func _draw() -> void:
 		var turns := _path_turns(selected_unit, preview_path)
 		draw_string(font, prev + Vector2(8, -8), "%d turn%s" % [turns, "" if turns == 1 else "s"],
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(1, 1, 0.6))
-	_draw_ui(font, vp)
-	if show_diplo:
-		_draw_diplomacy(font, vp)
 
 
 func _draw_tile(c: Vector2i, pf: Vector2, p: Vector2, r: float, worked: Dictionary) -> void:
@@ -2008,169 +2158,3 @@ func _draw_unit_group(group: Array, c: Vector2i, r: float, font: Font) -> void:
 			HORIZONTAL_ALIGNMENT_CENTER, r * 2, fs2, Color(1, 0.9, 0.5))
 	elif u["sleep"]:
 		draw_string(font, Vector2(sp.x + 0.35 * r, top_y + fs2), "z z", HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, Color(0.8, 0.9, 1))
-
-
-func _draw_ui(font: Font, vp: Vector2) -> void:
-	var nat := me()
-	var inc_g := _trade_income(0)
-	var inc_r := 0
-	var pop := 0
-	var count := 0
-	for city in cities:
-		if city["owner"] != 0:
-			continue
-		var y := city_yield(city)
-		inc_g += y["g"]
-		inc_r += y["sci"]
-		pop += city["pop"]
-		count += 1
-
-	# Top bar
-	draw_rect(Rect2(0, 0, vp.x, 60), Color(0, 0, 0, 0.6))
-	draw_rect(Rect2(0, 0, 8, 60), ncol(0))
-	draw_string(font, Vector2(16, 26), "%s   Year %d  (turn %d)    Gold %d (+%d)    Research %d (+%d)    Pop %d    Cities %d    Score %d  (#%d of %d)"
-		% [ndef(0)["name"], year(), turn, nat["gold"], inc_g, nat["research"], inc_r, pop, count, score(0),
-		ranking().find(0) + 1, nations.size()], HORIZONTAL_ALIGNMENT_LEFT, -1, 19, Color(1, 1, 1))
-	var tx := 16.0
-	for key in TECHS.keys():
-		var t: Dictionary = TECHS[key]
-		var owned: bool = nat["tech"][key]
-		var label := "[%s] %s (%d): %s%s" % [t["key"], key, t["cost"], t["desc"], "  OK" if owned else ""]
-		var col := Color(0.5, 1, 0.6) if owned else (Color(0.95, 0.95, 0.6) if nat["research"] >= t["cost"] else Color(0.6, 0.6, 0.6))
-		draw_string(font, Vector2(tx, 50), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, col)
-		tx += font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x + 30
-	draw_string(font, Vector2(vp.x - 216, 50), "[D] Diplomacy", HORIZONTAL_ALIGNMENT_RIGHT, 200, 14, Color(0.7, 0.85, 1))
-
-	if event_text != "":
-		draw_string(font, Vector2(16, 88), "* " + event_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 0.8, 0.3))
-	if message != "":
-		draw_string(font, Vector2(16, 112), message, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.9, 0.95, 1))
-
-	# Bottom-left: selection panel
-	var lines := []   # [text, color]
-	if not selected_unit.is_empty():
-		var u := selected_unit
-		var spec: Dictionary = UNITS[u["type"]]
-		lines.append(["%s    Moves %s / %d" % [spec["name"], str(snappedf(u["mp"], 0.5)), spec["mp"]], Color(1, 1, 0.6)])
-		match u["type"]:
-			"settler": lines.append(["[B] Found a city here", Color(1, 1, 1)])
-			"worker":
-				lines.append(["[F] Farm  [M] Mine  [R] Road  [C] Chop forest", Color(1, 1, 1)])
-				if u["job"] != "":
-					lines.append(["Working: %s (%d turns left)" % [u["job"], u["job_left"]], Color(1, 0.9, 0.5)])
-			"scout": lines.append(["Sees 3 hexes. Chiefs give scouts bigger gifts.", Color(0.8, 0.8, 0.8)])
-			"guard": lines.append(["Protects cities. (Combat comes in Lesson 11)", Color(0.8, 0.8, 0.8)])
-		var v := _village_near(u["cell"])
-		if not v.is_empty():
-			lines.append(["[T] Give %d gold to the %s  (+%d attitude)" % [GIFT_GOLD, TRIBES[v["tribe"]]["name"], GIFT_ATT], Color(0.6, 1, 0.9)])
-		lines.append(["Right-click: move    [Space] Skip turn    [H] Sleep", Color(0.8, 0.8, 0.8)])
-	elif not selected_city.is_empty():
-		var city := selected_city
-		var y := city_yield(city)
-		lines.append(["%s    size %d    borders r%d" % [city["name"], city["pop"], city["radius"]], Color(1, 1, 0.6)])
-		lines.append(["Food %d/%d (%+d)    Prod %d (+%d)    Gold +%d    Research +%d" % [city["food"], growth_need(city),
-			y["f"] - y["eat"], city["prod"], y["p"], y["g"], y["sci"]], Color(1, 1, 1)])
-		var item: String = city["build"]
-		var buy := ""
-		if item != "":
-			buy = "    [G] Buy for %d gold" % maxi(0, (build_cost(item) - int(city["prod"])) * 2)
-		lines.append(["Building: %s%s" % [_item_name(item), buy], Color(0.6, 1, 0.7) if item != "" else Color(1, 0.5, 0.4)])
-		var row := ""
-		for i in BUILD_ORDER.size():
-			var key: String = BUILD_ORDER[i]
-			var done: bool = key in city["blds"]
-			row += "[%d] %s %s   " % [i + 1, _item_name(key), "(built)" if done else str(build_cost(key))]
-			if i == 3 or i == BUILD_ORDER.size() - 1:
-				lines.append([row, Color(0.85, 0.85, 0.85)])
-				row = ""
-	if not lines.is_empty():
-		var h := 14.0 + lines.size() * 22.0
-		draw_rect(Rect2(10, vp.y - h - 40, 560, h), Color(0, 0, 0, 0.62))
-		for i in lines.size():
-			draw_string(font, Vector2(20, vp.y - h - 40 + 26 + i * 22), lines[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, 16, lines[i][1])
-
-	# Bottom-right: hovered hex info
-	if terrain.has(hovered):
-		draw_string(font, Vector2(vp.x - 620, vp.y - 50), _hover_info(), HORIZONTAL_ALIGNMENT_RIGHT, 600, 16, Color(0.9, 0.95, 0.85))
-
-	var waiting := units.filter(func(u): return _needs_orders(u)).size()
-	var end_col := Color(1, 1, 0.5) if waiting == 0 else Color(0.75, 0.75, 0.75)
-	draw_string(font, Vector2(vp.x - 470, vp.y - 72), "[Enter] End turn   (%d unit%s waiting)" % [waiting, "" if waiting == 1 else "s"],
-		HORIZONTAL_ALIGNMENT_RIGHT, 450, 17, end_col)
-	draw_string(font, Vector2(16, vp.y - 12), "Left: select   Right: move   Tab: next unit   D: diplomacy   Arrows / middle-drag: pan   Wheel: zoom   F5 save   F9 load   F2 new map",
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.75, 0.75, 0.75))
-
-	if game_over:
-		var order := ranking()
-		var txt := ""
-		for i in order.size():
-			txt += "%d. %s %d    " % [i + 1, ndef(order[i])["name"], score(order[i])]
-		draw_rect(Rect2(0, vp.y * 0.4, vp.x, 110), Color(0, 0, 0, 0.7))
-		draw_string(font, Vector2(0, vp.y * 0.4 + 42), "Year %d  —  you finished #%d of %d" % [year(), order.find(0) + 1, order.size()],
-			HORIZONTAL_ALIGNMENT_CENTER, vp.x, 32, Color(0.5, 1, 0.6))
-		draw_string(font, Vector2(0, vp.y * 0.4 + 72), txt, HORIZONTAL_ALIGNMENT_CENTER, vp.x, 18, Color(1, 1, 1))
-		draw_string(font, Vector2(0, vp.y * 0.4 + 98), "Press F2 for a new map", HORIZONTAL_ALIGNMENT_CENTER, vp.x, 16, Color(0.8, 0.8, 0.8))
-
-
-func _hover_info() -> String:
-	if not seen.has(hovered):
-		return "Unexplored"
-	if village_at.has(hovered):
-		var v: Dictionary = village_at[hovered]
-		var t: int = v["tribe"]
-		var a: int = tribes[t]["att"][0]
-		return "%s village   attitude %d (%s)%s" % [TRIBES[t]["name"], a, mood(a), "" if v["visited"] else "   not visited"]
-	var ty := tile_yield(hovered)
-	var info := "%s   F%d P%d G%d" % [TERRAIN[terrain[hovered]]["name"], ty.x, ty.y, ty.z]
-	if improvements.has(hovered): info += "   +" + improvements[hovered]
-	if roads.has(hovered): info += "   road"
-	if territory.has(hovered):
-		var city := _city_by_id(territory[hovered])
-		info += "   (%s, %s)" % [city["name"], ndef(city["owner"])["name"]]
-	elif tribe_land.has(hovered):
-		info += "   (%s land)" % TRIBES[tribe_land[hovered]]["name"]
-	if in_sight.has(hovered):
-		for u in units:
-			if u["cell"] == hovered and u["owner"] != 0:
-				info += "   | %s %s" % [ndef(u["owner"])["name"], UNITS[u["type"]]["name"]]
-	return info
-
-
-func _draw_diplomacy(font: Font, vp: Vector2) -> void:
-	var lines := []   # [text, color]
-	lines.append(["DIPLOMACY   (D to close)", Color(1, 1, 0.6)])
-	lines.append(["Colonial powers", Color(0.7, 0.85, 1)])
-	for n in nations.size():
-		if n != 0 and not nations[n]["met"]:
-			lines.append(["   ???  (not met yet)", Color(0.55, 0.55, 0.55)])
-			continue
-		var count := 0
-		var pop := 0
-		for city in cities:
-			if city["owner"] == n:
-				count += 1
-				pop += city["pop"]
-		lines.append(["   %s%s   cities %d   pop %d   score %d   — %s" % [ndef(n)["name"], " (you)" if n == 0 else "   Peace",
-			count, pop, score(n), ndef(n)["desc"]], ncol(n)])
-	lines.append(["Native tribes", Color(0.7, 0.85, 1)])
-	for t in tribes.size():
-		if not _tribe_alive(t):
-			continue
-		if not tribes[t]["met"]:
-			lines.append(["   ???  (not met yet)", Color(0.55, 0.55, 0.55)])
-			continue
-		var nv := villages.filter(func(v): return v["tribe"] == t).size()
-		var a: int = tribes[t]["att"][0]
-		lines.append(["   %s   villages %d   attitude %d (%s)   trade +%d gold/turn" % [TRIBES[t]["name"], nv, a, mood(a),
-			_trade_income(0, t)], TRIBES[t]["col"]])
-	lines.append(["", Color.WHITE])
-	lines.append(["Visit a village (walk next to it) for a gift.  [T] next to a village: give %d gold, +%d attitude." % [GIFT_GOLD, GIFT_ATT], Color(0.8, 0.8, 0.8)])
-	lines.append(["Friendly (%d+) and one of your cities within %d hexes: +1 gold per village each turn." % [TRADE_ATT, TRADE_RANGE], Color(0.8, 0.8, 0.8)])
-	lines.append(["Settling within 4 hexes of a village: -%d.  At %d or below they raid your nearest city." % [LAND_GRAB, RAID_ATT], Color(0.8, 0.8, 0.8)])
-	var w := 900.0
-	var h := 24.0 + lines.size() * 24.0
-	var top := Vector2((vp.x - w) * 0.5, (vp.y - h) * 0.5)
-	draw_rect(Rect2(top, Vector2(w, h)), Color(0.05, 0.06, 0.09, 0.93))
-	draw_rect(Rect2(top, Vector2(w, h)), Color(0.5, 0.6, 0.8), false, 2.0)
-	for i in lines.size():
-		draw_string(font, top + Vector2(20, 34 + i * 24), lines[i][0], HORIZONTAL_ALIGNMENT_LEFT, w - 40, 16, lines[i][1])
