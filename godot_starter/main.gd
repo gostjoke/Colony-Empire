@@ -8,8 +8,9 @@ extends Node2D
 #     land, garrison, research, court the tribes).
 #   - National traits (GDD 6.1), vision (foreign units only show
 #     near your own), diplomacy panel [D], final ranking in 1811.
-#  Lesson 10b: unit sprites (Colonist / Scout / Guard) tinted with
-#  each nation's colour at runtime; new Scout unit; Soldier -> Guard.
+#  Lesson 10b: unit sprites tinted with each nation's colour; new Scout unit.
+#  Lesson 10c: 2.5D — tilted map with raised hex prisms, depth-sorted
+#  pre-rendered 3D sprites (tools/render_sprites.gd), elevation-aware picking.
 # =============================================================
 
 const MAP_W := 70                 # columns (offset layout, odd rows shifted right)
@@ -44,7 +45,7 @@ const TERRAIN := {
 	"grass":    { "name": "Grassland", "f": 2, "p": 0, "g": 0, "move": 1, "col": Color(0.40, 0.64, 0.30) },
 	"plains":   { "name": "Plains",    "f": 1, "p": 1, "g": 0, "move": 1, "col": Color(0.70, 0.67, 0.38) },
 	"forest":   { "name": "Forest",    "f": 1, "p": 2, "g": 0, "move": 2, "col": Color(0.26, 0.48, 0.23) },
-	"hills":    { "name": "Hills",     "f": 0, "p": 2, "g": 0, "move": 2, "col": Color(0.58, 0.54, 0.35) },
+	"hills":    { "name": "Hills",     "f": 0, "p": 2, "g": 0, "move": 2, "col": Color(0.53, 0.55, 0.34) },
 	"mountain": { "name": "Mountain",  "f": 0, "p": 0, "g": 0, "move": 0, "col": Color(0.50, 0.48, 0.46) },
 }
 const VILLAGE_LAND := ["grass", "plains", "forest", "hills"]
@@ -89,8 +90,29 @@ const UNITS := {
 	"scout":   { "name": "Scout",    "mp": 3, "cost": 20, "icon": "S", "sight": 3 },
 	"guard":   { "name": "Guard",    "mp": 2, "cost": 25, "icon": "G", "sight": 2 },
 }
-const UNIT_ART := "res://assets/units/unit_%s.png"        # base art (team areas are grey)
-const UNIT_TEAM := "res://assets/units/unit_%s_team.png"  # white = where the nation colour goes
+
+# ---- 2.5D view (must match tools/render_sprites.gd) ----
+const TILT := 0.6                 # the ground is squashed to 60% height = sin(camera pitch 36.9 deg)
+const RISE := 0.8                 # 1 unit of height shows as 0.8 units on screen = cos(pitch)
+# Height of each hex's top, in hex radii
+const ELEV := { "ocean": 0.0, "coast": 0.0, "grass": 0.16, "plains": 0.16, "forest": 0.18, "hills": 0.32, "mountain": 0.4 }
+# Brightness of each hex corner (light from the upper left)
+const LIGHT := [0.98, 0.9, 0.85, 0.93, 1.05, 1.1]
+const SPRITE_DIR := "res://assets/sprites/"
+const SPRITE_ANCHOR := 0.84       # the ground point is 84% down each sprite image
+# view = world height of the sprite image (from render_sprites.gd); k = extra scale in game
+const SPRITES := {
+	"settler":   { "view": 3.0, "k": 0.78 },
+	"scout":     { "view": 3.0, "k": 0.78 },
+	"guard":     { "view": 3.0, "k": 0.78 },
+	"worker":    { "view": 3.0, "k": 0.78 },
+	"tree_pine": { "view": 1.3, "k": 1.0 },
+	"tree_leaf": { "view": 1.3, "k": 1.0 },
+	"hill":      { "view": 2.2, "k": 1.0 },
+	"mountain":  { "view": 2.6, "k": 1.0 },
+	"city":      { "view": 2.4, "k": 1.3 },
+	"village":   { "view": 2.2, "k": 1.2 },
+}
 
 const BUILDINGS := {
 	"granary":  { "name": "Granary",  "cost": 40, "desc": "+2 food" },
@@ -148,7 +170,12 @@ var hovered := Vector2i(9999, 9999)
 var preview_path := []
 var preview_key := []
 var show_diplo := false
-var unit_tex := {}       # "type:nation" -> tinted ImageTexture (built on first use)
+var sprite_tex := {}     # "name:colour" -> tinted texture (built on first use)
+var rows := []           # rows[r] = the hexes of map row r (drawn back to front)
+var labels := []         # city name plates, collected while drawing and painted last (always on top)
+var tile_cols := {}      # hex -> PackedColorArray of its lit top-face corner colours (cached)
+var corner_off := PackedVector2Array()   # the 6 corner offsets at the current zoom (per frame)
+var view_sig := []       # what the last frame showed; redraw only when this changes
 
 var message := ""
 var message_timer := 0.0
@@ -200,17 +227,44 @@ func hex_to_world(c: Vector2i) -> Vector2:
 	return Vector2(HEX * SQ3 * (c.x + c.y * 0.5), HEX * 1.5 * c.y)
 
 
-func world_to_screen(w: Vector2) -> Vector2:
-	return origin + w * zoom
+# World (flat map, pixels at zoom 1) -> screen, on the ground plane (height 0)
+func _flat(w: Vector2) -> Vector2:
+	return origin + Vector2(w.x, w.y * TILT) * zoom
 
 
+# How many screen pixels a hex's top is raised (unexplored hexes stay flat)
+func _lift(c: Vector2i) -> float:
+	if not seen.has(c) or not terrain.has(c):
+		return 0.0
+	return ELEV[terrain[c]] * RISE * HEX * zoom
+
+
+# Centre of the TOP of a hex on screen (where units stand)
 func hex_to_screen(c: Vector2i) -> Vector2:
-	return origin + hex_to_world(c) * zoom
+	return _flat(hex_to_world(c)) - Vector2(0, _lift(c))
 
 
+func _world_to_hex(w: Vector2) -> Vector2i:
+	return _hex_round((SQ3 / 3.0 * w.x - w.y / 3.0) / HEX, (2.0 / 3.0 * w.y) / HEX)
+
+
+# For units sliding between hexes: stand on the height of the hex under them
+func world_to_screen(w: Vector2) -> Vector2:
+	return _flat(w) - Vector2(0, _lift(_world_to_hex(w)))
+
+
+# Mouse -> hex. Raised hexes are drawn higher than their flat position, so test the real
+# top faces of the nearby hexes and keep the front-most (lowest row on screen) hit.
 func screen_to_hex(pos: Vector2) -> Vector2i:
 	var p := (pos - origin) / zoom
-	return _hex_round((SQ3 / 3.0 * p.x - p.y / 3.0) / HEX, (2.0 / 3.0 * p.y) / HEX)
+	var guess := _world_to_hex(Vector2(p.x, p.y / TILT))
+	var best := guess
+	var best_row := -999999
+	for h in hexes_in_range(guess, 2):
+		if h.y > best_row and Geometry2D.is_point_in_polygon(pos, _hex_points(hex_to_screen(h), HEX * zoom)):
+			best = h
+			best_row = h.y
+	return best
 
 
 func _hex_round(qf: float, rf: float) -> Vector2i:
@@ -254,6 +308,8 @@ func _min_dist(c: Vector2i, cells: Array) -> int:
 # ---------- Map ----------
 func _generate_terrain() -> void:
 	terrain.clear()
+	rows.clear()
+	tile_cols.clear()
 	var elev := FastNoiseLite.new()
 	elev.seed = map_seed
 	elev.frequency = 0.06
@@ -261,6 +317,7 @@ func _generate_terrain() -> void:
 	moist.seed = map_seed + 1000
 	moist.frequency = 0.09
 	for row in range(MAP_H):
+		rows.append([])
 		for col in range(MAP_W):
 			var x := col + (row & 1) * 0.5
 			var y := row * 0.866
@@ -277,6 +334,7 @@ func _generate_terrain() -> void:
 			elif m > 0.58: t = "forest"
 			elif m < 0.42: t = "plains"
 			terrain[offset_to_axial(col, row)] = t
+			rows[row].append(offset_to_axial(col, row))
 	for c in chopped.keys():
 		terrain[c] = "plains"
 	# Ocean next to land becomes shallow coast
@@ -535,6 +593,7 @@ func _finish_job(u: Dictionary) -> void:
 		"chop":
 			terrain[c] = "plains"
 			chopped[c] = true
+			tile_cols.erase(c)
 			var city := _city_by_id(territory.get(c, -1))
 			if not city.is_empty() and city["owner"] == u["owner"]:
 				city["prod"] += CHOP_PROD
@@ -1268,7 +1327,8 @@ func _update_preview() -> void:
 
 # ---------- Camera ----------
 func _center_on(c: Vector2i) -> void:
-	origin = get_viewport_rect().size * 0.5 - hex_to_world(c) * zoom
+	var w := hex_to_world(c)
+	origin = get_viewport_rect().size * 0.5 - Vector2(w.x, w.y * TILT) * zoom
 
 
 func _show_if_offscreen(c: Vector2i) -> void:
@@ -1295,8 +1355,13 @@ func _process(delta: float) -> void:
 		origin += pan * PAN_SPEED * delta
 
 	hovered = screen_to_hex(get_global_mouse_position())
-	for u in units:   # slide unit tokens smoothly toward their hex
-		u["dp"] = (u["dp"] as Vector2).lerp(hex_to_world(u["cell"]), minf(1.0, delta * 10.0))
+	var moving := false
+	for u in units:   # slide unit figures smoothly toward their hex
+		var target := hex_to_world(u["cell"])
+		var dp: Vector2 = u["dp"]
+		if dp.distance_squared_to(target) > 0.01:
+			u["dp"] = dp.lerp(target, minf(1.0, delta * 10.0))
+			moving = true
 	_update_preview()
 
 	if message_timer > 0.0:
@@ -1305,11 +1370,18 @@ func _process(delta: float) -> void:
 	if event_timer > 0.0:
 		event_timer -= delta
 		if event_timer <= 0.0: event_text = ""
-	queue_redraw()
+	# The map is static most of the time: only repaint when something visible changed
+	var sig := [origin, zoom, hovered, selected_unit.get("id", -1), selected_city.get("id", -1),
+		message, event_text, show_diplo, turn, game_over, units.size(), cities.size()]
+	if moving or sig != view_sig:
+		view_sig = sig
+		queue_redraw()
 
 
 # ---------- Input ----------
 func _unhandled_input(event: InputEvent) -> void:
+	if not event is InputEventMouseMotion:
+		queue_redraw()      # any key / click may change what's shown
 	if event is InputEventKey and event.pressed and not event.echo:
 		_on_key(event.keycode)
 	elif event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_MIDDLE) != 0:
@@ -1580,222 +1652,38 @@ func _show_event(text: String) -> void:
 	event_text = text; event_timer = 4.0
 
 
-# ---------- Drawing ----------
+# ---------- Drawing (2.5D) ----------
+# The ground is squashed by TILT (a camera looking down at ~37 degrees). Every hex is a short
+# prism: its top is lifted by its height, and the two front walls are drawn below it.
+# Rows are painted back (top of the screen) to front, and after each row come the sprites
+# standing on it (trees, mountains, villages, cities, units) -> correct overlap for free.
 func _hash_cell(c: Vector2i) -> int:
 	return abs((c.x * 73856093) ^ (c.y * 19349663))
 
 
 func _hex_points(p: Vector2, r: float) -> PackedVector2Array:
 	var pts := PackedVector2Array()
-	for k in CORNERS:
-		pts.append(p + k * r)
+	pts.resize(6)
+	for i in 6:
+		var k: Vector2 = CORNERS[i]
+		pts[i] = p + Vector2(k.x * r, k.y * r * TILT)
 	return pts
+
+
+func _fast_points(p: Vector2) -> PackedVector2Array:    # same, using this frame's cached offsets
+	var pts := corner_off.duplicate()
+	for i in 6:
+		pts[i] += p
+	return pts
+
+
+func _corner(p: Vector2, i: int, r: float) -> Vector2:
+	var k: Vector2 = CORNERS[i % 6]
+	return p + Vector2(k.x * r, k.y * r * TILT)
 
 
 func _on_screen(p: Vector2, vp: Vector2, m: float) -> bool:
 	return p.x > -m and p.y > -m and p.x < vp.x + m and p.y < vp.y + m
-
-
-func _draw() -> void:
-	var vp := get_viewport_rect().size
-	var r := HEX * zoom
-	var font := ThemeDB.fallback_font
-	draw_rect(Rect2(Vector2.ZERO, vp), Color(0.04, 0.04, 0.06))   # background beyond the map edge
-
-	# 1) Terrain, improvements, roads, grid
-	for c in terrain.keys():
-		var p := hex_to_screen(c)
-		if not _on_screen(p, vp, r * 2):
-			continue
-		var pts := _hex_points(p, r)
-		if not seen.has(c):
-			draw_colored_polygon(pts, Color(0.06, 0.06, 0.08))
-			continue
-		var t: String = terrain[c]
-		var col: Color = TERRAIN[t]["col"]
-		var j := 0.94 + float(_hash_cell(c) % 12) / 100.0     # small per-hex shade variation
-		draw_colored_polygon(pts, Color(col.r * j, col.g * j, col.b * j))
-		_draw_decor(t, p, r)
-		if improvements.has(c):
-			_draw_improvement(improvements[c], p, r)
-		if roads.has(c) or city_at.has(c):
-			_draw_roads(c, p, r)
-		pts.append(pts[0])
-		draw_polyline(pts, Color(0, 0, 0, 0.16), 1.0)
-
-	# 2) Borders: colonies (thick, nation colour) and tribal land (thin, tribe colour)
-	for c in territory.keys():
-		var p := hex_to_screen(c)
-		if not seen.has(c) or not _on_screen(p, vp, r * 2):
-			continue
-		var n := _cell_nation(c)
-		for i in 6:
-			if _cell_nation(c + DIRS[i]) != n:
-				draw_line(p + CORNERS[i] * r * 0.93, p + CORNERS[(i + 1) % 6] * r * 0.93, ncol(n), 3.0 * zoom)
-	for c in tribe_land.keys():
-		var p := hex_to_screen(c)
-		if not seen.has(c) or not _on_screen(p, vp, r * 2):
-			continue
-		var t: int = tribe_land[c]
-		for i in 6:
-			if tribe_land.get(c + DIRS[i], -1) != t:
-				draw_line(p + CORNERS[i] * r * 0.9, p + CORNERS[(i + 1) % 6] * r * 0.9, TRIBES[t]["col"], 2.0 * zoom)
-
-	# 3) Selected city: its worked tiles
-	if not selected_city.is_empty():
-		for h in city_yield(selected_city)["worked"]:
-			draw_arc(hex_to_screen(h), r * 0.45, 0, TAU, 20, Color(1, 1, 1, 0.8), 2.0 * zoom)
-		var cp := _hex_points(hex_to_screen(selected_city["cell"]), r)
-		cp.append(cp[0])
-		draw_polyline(cp, Color(1, 1, 0.5), 2.5 * zoom)
-
-	# 4) Hover highlight + move preview
-	if terrain.has(hovered):
-		draw_colored_polygon(_hex_points(hex_to_screen(hovered), r), Color(1, 1, 1, 0.16))
-	if not selected_unit.is_empty() and not preview_path.is_empty():
-		var prev := hex_to_screen(selected_unit["cell"])
-		for c in preview_path:
-			var nx := hex_to_screen(c)
-			draw_line(prev, nx, Color(1, 1, 1, 0.85), 2.5 * zoom)
-			prev = nx
-		draw_circle(prev, 5.0 * zoom, Color(1, 1, 1))
-		var turns := _path_turns(selected_unit, preview_path)
-		draw_string(font, prev + Vector2(8, -8), "%d turn%s" % [turns, "" if turns == 1 else "s"],
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(1, 1, 0.6))
-
-	# 5) Villages, cities, units
-	for v in villages:
-		if seen.has(v["cell"]) and _on_screen(hex_to_screen(v["cell"]), vp, r * 2):
-			_draw_village(v, font, r)
-	for city in cities:
-		if seen.has(city["cell"]) and _on_screen(hex_to_screen(city["cell"]), vp, r * 4):
-			_draw_city(city, font, r)
-	_draw_units(font, vp, r)
-	_draw_ui(font, vp)
-	if show_diplo:
-		_draw_diplomacy(font, vp)
-
-
-func _draw_decor(t: String, p: Vector2, r: float) -> void:
-	match t:
-		"forest":
-			for off in [Vector2(-0.35, 0.2), Vector2(0.32, 0.22), Vector2(0.0, -0.2)]:
-				var b: Vector2 = p + off * r
-				draw_line(b + Vector2(0, 0.1 * r), b + Vector2(0, 0.22 * r), Color(0.35, 0.24, 0.14), 2.0 * zoom)
-				draw_colored_polygon(PackedVector2Array([b + Vector2(0, -0.3 * r),
-					b + Vector2(0.19 * r, 0.12 * r), b + Vector2(-0.19 * r, 0.12 * r)]), Color(0.12, 0.32, 0.14))
-		"hills":
-			var hc := Color(0.40, 0.36, 0.22)
-			draw_arc(p + Vector2(-0.25 * r, 0.25 * r), 0.3 * r, PI, TAU, 10, hc, 2.5 * zoom)
-			draw_arc(p + Vector2(0.22 * r, -0.02 * r), 0.3 * r, PI, TAU, 10, hc, 2.5 * zoom)
-		"mountain":
-			draw_colored_polygon(PackedVector2Array([p + Vector2(0, -0.62 * r),
-				p + Vector2(0.58 * r, 0.42 * r), p + Vector2(-0.58 * r, 0.42 * r)]), Color(0.34, 0.32, 0.31))
-			draw_colored_polygon(PackedVector2Array([p + Vector2(0, -0.62 * r),
-				p + Vector2(0.18 * r, -0.29 * r), p + Vector2(-0.18 * r, -0.29 * r)]), Color(0.95, 0.95, 0.97))
-		"ocean", "coast":
-			var w := Color(1, 1, 1, 0.12)
-			draw_line(p + Vector2(-0.35 * r, -0.12 * r), p + Vector2(-0.05 * r, -0.12 * r), w, 1.5 * zoom)
-			draw_line(p + Vector2(0.02 * r, 0.22 * r), p + Vector2(0.32 * r, 0.22 * r), w, 1.5 * zoom)
-
-
-func _draw_improvement(kind: String, p: Vector2, r: float) -> void:
-	if kind == "farm":
-		for i in 3:
-			var yy := (-0.3 + i * 0.25) * r
-			draw_line(p + Vector2(-0.45 * r, yy), p + Vector2(0.45 * r, yy), Color(0.92, 0.82, 0.32), 2.5 * zoom)
-	elif kind == "mine":
-		draw_colored_polygon(PackedVector2Array([p + Vector2(-0.2 * r, 0.35 * r),
-			p + Vector2(0, 0.05 * r), p + Vector2(0.2 * r, 0.35 * r)]), Color(0.15, 0.12, 0.1))
-
-
-func _draw_roads(c: Vector2i, p: Vector2, r: float) -> void:
-	var col := Color(0.50, 0.37, 0.22)
-	var linked := false
-	for d in DIRS:
-		var n: Vector2i = c + d
-		if roads.has(n) or city_at.has(n):
-			draw_line(p, p.lerp(hex_to_screen(n), 0.5), col, 3.0 * zoom)
-			linked = true
-	if not linked:
-		draw_circle(p, 3.0 * zoom, col)
-
-
-func _draw_village(v: Dictionary, font: Font, r: float) -> void:
-	var p := hex_to_screen(v["cell"])
-	var tcol: Color = TRIBES[v["tribe"]]["col"]
-	draw_circle(p, 0.6 * r, Color(tcol, 0.3))
-	for off in [Vector2(-0.27, 0.15), Vector2(0.27, 0.15), Vector2(0.0, -0.17)]:
-		var b: Vector2 = p + off * r
-		var s := 0.17 * r
-		draw_line(b + Vector2(0, -s * 1.3), b + Vector2(0, -s * 1.8), Color(0.3, 0.2, 0.1), 1.5 * zoom)
-		draw_colored_polygon(PackedVector2Array([b + Vector2(0, -s * 1.3), b + Vector2(s, s * 0.6),
-			b + Vector2(-s, s * 0.6)]), Color(0.88, 0.76, 0.55))
-		draw_line(b + Vector2(0, -s * 1.3), b + Vector2(0, s * 0.6), Color(0.45, 0.3, 0.18), 1.0 * zoom)
-	if not v["visited"]:   # "?" = not visited yet (visiting gives a gift)
-		draw_string(font, p + Vector2(0.3 * r, -0.35 * r), "?", HORIZONTAL_ALIGNMENT_LEFT, -1,
-			int(clampf(18.0 * zoom, 10, 30)), Color(1, 0.95, 0.4))
-
-
-func _draw_city(city: Dictionary, font: Font, r: float) -> void:
-	var p := hex_to_screen(city["cell"])
-	var n: int = city["owner"]
-	draw_circle(p, 0.62 * r, Color(0.18, 0.18, 0.2, 0.85))
-	for off in [Vector2(-0.28, 0.12), Vector2(0.24, 0.16), Vector2(-0.02, -0.18)]:
-		var b: Vector2 = p + off * r
-		var s := 0.14 * r
-		draw_rect(Rect2(b - Vector2(s, s * 0.4), Vector2(s * 2, s * 1.4)), Color(0.92, 0.88, 0.78))
-		draw_colored_polygon(PackedVector2Array([b + Vector2(-s * 1.25, -s * 0.4),
-			b + Vector2(0, -s * 1.5), b + Vector2(s * 1.25, -s * 0.4)]), Color(0.72, 0.26, 0.2))
-	# Name plate in the owner's colour: "Name  pop"
-	var fs := int(clampf(14.0 * zoom, 10, 22))
-	var label := "%s  %d" % [city["name"], city["pop"]]
-	var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-	var top := p + Vector2(-tw * 0.5 - 6, -r * 0.85 - fs * 0.5 - 3)
-	draw_rect(Rect2(top, Vector2(tw + 12, fs + 6)), Color(ncol(n).darkened(0.35), 0.9))
-	draw_string(font, top + Vector2(6, fs + 1), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1))
-	if n != 0:
-		return
-	var item: String = city["build"]
-	var sub := "choose build!"
-	var sub_col := Color(1, 0.5, 0.4)
-	if item != "":
-		var per_turn: int = maxi(1, city_yield(city)["p"])
-		var left := maxi(0, build_cost(item) - int(city["prod"]))
-		sub = "%s %dt" % [_item_name(item), ceili(left / float(per_turn))]
-		sub_col = Color(0.9, 0.9, 0.9)
-	var fs2 := int(clampf(12.0 * zoom, 9, 18))
-	draw_string(font, p + Vector2(-r * 3, r * 0.95), sub, HORIZONTAL_ALIGNMENT_CENTER, r * 6, fs2, sub_col)
-
-
-# Build (once) a copy of a unit sprite painted in a nation's colour.
-# unit_X.png has the team areas in grey; unit_X_team.png says where they are (white = 100%).
-# new pixel = lerp(pixel, pixel * nation colour, mask)  -> keeps the shading of the grey.
-func _unit_texture(type: String, n: int) -> Texture2D:
-	var key := "%s:%d" % [type, n]
-	if unit_tex.has(key):
-		return unit_tex[key]
-	var tex: Texture2D = null
-	if ResourceLoader.exists(UNIT_ART % type) and ResourceLoader.exists(UNIT_TEAM % type):
-		var base: Image = (load(UNIT_ART % type) as Texture2D).get_image()
-		var mask: Image = (load(UNIT_TEAM % type) as Texture2D).get_image()
-		for img in [base, mask]:
-			if img.is_compressed(): img.decompress()
-			img.convert(Image.FORMAT_RGBA8)
-		var col := ncol(n)
-		var data := base.get_data()
-		var m := mask.get_data()
-		for i in range(0, data.size(), 4):
-			var a: float = m[i + 3] / 255.0
-			if a > 0.0:
-				data[i] = int(data[i] * (1.0 - a + a * col.r))
-				data[i + 1] = int(data[i + 1] * (1.0 - a + a * col.g))
-				data[i + 2] = int(data[i + 2] * (1.0 - a + a * col.b))
-		var img := Image.create_from_data(base.get_width(), base.get_height(), false, Image.FORMAT_RGBA8, data)
-		img.generate_mipmaps()
-		tex = ImageTexture.create_from_image(img)
-	unit_tex[key] = tex      # null = no art yet -> token fallback
-	return tex
 
 
 func _draw_ellipse(center: Vector2, rx: float, ry: float, col: Color, width: float = -1.0) -> void:
@@ -1807,9 +1695,53 @@ func _draw_ellipse(center: Vector2, rx: float, ry: float, col: Color, width: flo
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
-func _draw_units(font: Font, vp: Vector2, r: float) -> void:
-	# Group units by hex; draw one figure per hex (the selected one, else your own) + a count badge.
-	# Clicking the hex again cycles through the stack.
+# A sprite painted in a team colour (nation or tribe), built once and cached.
+# <name>.png has the team areas in grey, <name>_team.png says where they are (white = 100%).
+# new pixel = lerp(pixel, pixel * colour, mask) -> the 3D shading of the grey is kept.
+func _sprite_tex(sname: String, team: Color) -> Texture2D:
+	if not sprite_tex.has(sname):
+		sprite_tex[sname] = {}
+	var cache: Dictionary = sprite_tex[sname]
+	if cache.has(team):
+		return cache[team]
+	var tex: Texture2D = null
+	var base_path := SPRITE_DIR + sname + ".png"
+	var mask_path := SPRITE_DIR + sname + "_team.png"
+	if ResourceLoader.exists(base_path):
+		var img: Image = (load(base_path) as Texture2D).get_image()
+		if img.is_compressed(): img.decompress()
+		img.convert(Image.FORMAT_RGBA8)
+		if team.a > 0.0 and ResourceLoader.exists(mask_path):
+			var mask: Image = (load(mask_path) as Texture2D).get_image()
+			if mask.is_compressed(): mask.decompress()
+			mask.convert(Image.FORMAT_RGBA8)
+			var data := img.get_data()
+			var m := mask.get_data()
+			for i in range(0, data.size(), 4):
+				var a: float = m[i + 3] / 255.0
+				if a > 0.0:
+					data[i] = int(data[i] * (1.0 - a + a * team.r))
+					data[i + 1] = int(data[i + 1] * (1.0 - a + a * team.g))
+					data[i + 2] = int(data[i + 2] * (1.0 - a + a * team.b))
+			img = Image.create_from_data(img.get_width(), img.get_height(), false, Image.FORMAT_RGBA8, data)
+		img.generate_mipmaps()          # smooth when the map is zoomed out
+		tex = ImageTexture.create_from_image(img)
+	cache[team] = tex      # null = no art -> callers fall back to simple shapes
+	return tex
+
+
+# Draw a sprite with its ground point at `ground`. Returns the drawn image height (0 if missing).
+func _draw_sprite(sname: String, ground: Vector2, r: float, s := 1.0, team := Color(0, 0, 0, 0), modulate := Color(1, 1, 1)) -> float:
+	var tex := _sprite_tex(sname, team)
+	if tex == null:
+		return 0.0
+	var spec: Dictionary = SPRITES[sname]
+	var h: float = spec["view"] * spec["k"] * r * s
+	draw_texture_rect(tex, Rect2(ground.x - h * 0.5, ground.y - h * SPRITE_ANCHOR, h, h), false, modulate)
+	return h
+
+
+func _unit_groups() -> Dictionary:
 	var groups := {}
 	for u in units:
 		var c: Vector2i = u["cell"]
@@ -1818,60 +1750,264 @@ func _draw_units(font: Font, vp: Vector2, r: float) -> void:
 		if not groups.has(c):
 			groups[c] = []
 		groups[c].append(u)
-	var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)
-	for c in groups.keys():
-		var group: Array = groups[c]
-		var u: Dictionary = group[0]
-		for o in group:
-			if _is_same(o, selected_unit) or (o["owner"] == 0 and u["owner"] != 0):
-				u = o
-		for o in group:
-			if _is_same(o, selected_unit):
-				u = o
-		var n: int = u["owner"]
-		var sp := world_to_screen(u["dp"])
-		if city_at.has(c):
-			sp += Vector2(0.4 * r, 0.25 * r)
-		if not _on_screen(sp, vp, r * 2):
+	return groups
+
+
+func _draw() -> void:
+	var vp := get_viewport_rect().size
+	var r := HEX * zoom
+	var font := ThemeDB.fallback_font
+	corner_off = _hex_points(Vector2.ZERO, r)
+	draw_rect(Rect2(Vector2.ZERO, vp), Color(0.04, 0.04, 0.06))   # background beyond the map edge
+	var groups := _unit_groups()
+	labels.clear()
+	var worked := {}
+	if not selected_city.is_empty():
+		for h in city_yield(selected_city)["worked"]:
+			worked[h] = true
+	# Only the rows that can be on screen (+ a few below: their sprites stick up into view)
+	var row_h := 1.5 * HEX * TILT * zoom
+	var r0 := maxi(0, int(floor(-origin.y / row_h)) - 2)
+	var r1 := mini(rows.size() - 1, int(ceil((vp.y - origin.y) / row_h)) + 4)
+	for row in range(r0, r1 + 1):
+		var vis := []
+		for c in rows[row]:
+			var pf := _flat(hex_to_world(c))
+			if pf.x > -r * 3 and pf.x < vp.x + r * 3:
+				var p := pf - Vector2(0, _lift(c))
+				_draw_tile(c, pf, p, r, worked)
+				vis.append([c, p])
+		for e in vis:
+			_draw_objects(e[0], e[1], r, font, groups)
+	for lb in labels:
+		_draw_city_label(lb, r, font)
+	# Move preview (on top of everything)
+	if not selected_unit.is_empty() and not preview_path.is_empty():
+		var prev := hex_to_screen(selected_unit["cell"])
+		for c in preview_path:
+			var nx := hex_to_screen(c)
+			draw_line(prev, nx, Color(0, 0, 0, 0.35), 5.0 * zoom)
+			draw_line(prev, nx, Color(1, 1, 1, 0.9), 2.5 * zoom)
+			prev = nx
+		_draw_ellipse(prev, 6.0 * zoom, 6.0 * zoom * TILT, Color(1, 1, 1))
+		var turns := _path_turns(selected_unit, preview_path)
+		draw_string(font, prev + Vector2(8, -8), "%d turn%s" % [turns, "" if turns == 1 else "s"],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(1, 1, 0.6))
+	_draw_ui(font, vp)
+	if show_diplo:
+		_draw_diplomacy(font, vp)
+
+
+func _draw_tile(c: Vector2i, pf: Vector2, p: Vector2, r: float, worked: Dictionary) -> void:
+	if not seen.has(c):
+		draw_colored_polygon(_fast_points(pf), Color(0.06, 0.06, 0.08))
+		return
+	var ty: String = terrain[c]
+	var lift := pf.y - p.y
+	var pts := _fast_points(p)
+	# Front walls (south-east and south-west faces) of the raised hex
+	if lift > 0.5:
+		var rocky := ty == "hills" or ty == "mountain"
+		var side := Color(0.50, 0.46, 0.40) if rocky else Color(0.47, 0.35, 0.22)
+		var down := Vector2(0, lift)
+		for i in [1, 2]:
+			var a: Vector2 = pts[i]
+			var b: Vector2 = pts[i + 1]
+			draw_colored_polygon(PackedVector2Array([a, b, b + down, a + down]), side.darkened(0.3 if i == 1 else 0.1))
+		# a thin grassy lip along the top of the walls
+		draw_polyline(PackedVector2Array([pts[1], pts[2], pts[3]]), (TERRAIN[ty]["col"] as Color).darkened(0.25), 1.5 * zoom)
+	# Top face, lit from the upper left (per-corner brightness; cached per hex)
+	if not tile_cols.has(c):
+		var base: Color = TERRAIN[ty]["col"]
+		var j := 0.95 + float(_hash_cell(c) % 10) / 100.0
+		var cols := PackedColorArray()
+		for i in 6:
+			var f: float = LIGHT[i] * j
+			cols.append(Color(base.r * f, base.g * f, base.b * f))
+		tile_cols[c] = cols
+	draw_polygon(pts, tile_cols[c])
+	if _is_water(ty):
+		# ripples (shifted a little per hex so the sea doesn't look like a grid)
+		var w := Color(1, 1, 1, 0.13)
+		var s := (float(_hash_cell(c) % 9) - 4.0) * 0.02 * r
+		draw_line(p + Vector2(-0.4 * r + s, -0.15 * r * TILT), p + Vector2(-0.1 * r + s, -0.15 * r * TILT), w, 1.5 * zoom)
+		draw_line(p + Vector2(0.05 * r - s, 0.3 * r * TILT), p + Vector2(0.36 * r - s, 0.3 * r * TILT), w, 1.5 * zoom)
+	var ring := pts.duplicate()
+	ring.append(pts[0])
+	draw_polyline(ring, Color(0, 0, 0, 0.13), 1.0)
+	# Things painted flat on the top face
+	if improvements.get(c, "") == "farm":
+		for i in 4:
+			var yy := (-0.42 + i * 0.28) * r * TILT
+			var fc := Color(0.88, 0.76, 0.34) if i % 2 == 0 else Color(0.66, 0.52, 0.26)
+			draw_line(p + Vector2(-0.5 * r, yy), p + Vector2(0.5 * r, yy), fc, 3.2 * zoom)
+	if roads.has(c) or city_at.has(c):
+		_draw_roads(c, p, r)
+	if territory.has(c):
+		var n := _cell_nation(c)
+		for i in 6:
+			if _cell_nation(c + DIRS[i]) != n:
+				draw_line(p + (_corner(Vector2.ZERO, i, r)) * 0.92, p + (_corner(Vector2.ZERO, i + 1, r)) * 0.92, ncol(n), 3.0 * zoom)
+	elif tribe_land.has(c):
+		var tr: int = tribe_land[c]
+		for i in 6:
+			if tribe_land.get(c + DIRS[i], -1) != tr:
+				draw_line(p + (_corner(Vector2.ZERO, i, r)) * 0.9, p + (_corner(Vector2.ZERO, i + 1, r)) * 0.9, TRIBES[tr]["col"], 2.0 * zoom)
+	if worked.has(c):
+		_draw_ellipse(p, 0.45 * r, 0.45 * r * TILT, Color(1, 1, 1, 0.85), 2.0 * zoom)
+	if not selected_city.is_empty() and selected_city["cell"] == c:
+		draw_polyline(ring, Color(1, 1, 0.5), 2.5 * zoom)
+	if c == hovered:
+		draw_colored_polygon(pts, Color(1, 1, 1, 0.16))
+
+
+func _draw_roads(c: Vector2i, p: Vector2, r: float) -> void:
+	var linked := false
+	for d in DIRS:
+		var n: Vector2i = c + d
+		if roads.has(n) or city_at.has(n):
+			var mid := p.lerp(hex_to_screen(n), 0.5)
+			draw_line(p, mid, Color(0.33, 0.24, 0.14), 5.0 * zoom)
+			draw_line(p, mid, Color(0.62, 0.48, 0.3), 3.0 * zoom)
+			linked = true
+	if not linked:
+		_draw_ellipse(p, 3.0 * zoom, 3.0 * zoom * TILT, Color(0.62, 0.48, 0.3))
+
+
+func _draw_objects(c: Vector2i, p: Vector2, r: float, font: Font, groups: Dictionary) -> void:
+	if not seen.has(c):
+		return
+	var site := city_at.has(c) or village_at.has(c)
+	match terrain[c]:
+		"forest":
+			if not site:
+				_draw_forest(c, p, r)
+		"hills":
+			if not site:
+				_draw_sprite("hill", p, r)
+		"mountain":
+			_draw_sprite("mountain", p + Vector2(0, 0.08 * r), r, 0.95 + float(_hash_cell(c) % 10) / 100.0)
+	if improvements.get(c, "") == "mine":
+		var m := p + Vector2(0.12 * r, 0.12 * r * TILT)
+		draw_colored_polygon(PackedVector2Array([m + Vector2(-0.16 * r, 0), m + Vector2(-0.16 * r, -0.14 * r),
+			m + Vector2(0, -0.24 * r), m + Vector2(0.16 * r, -0.14 * r), m + Vector2(0.16 * r, 0)]), Color(0.45, 0.32, 0.18))
+		draw_colored_polygon(PackedVector2Array([m + Vector2(-0.1 * r, 0), m + Vector2(-0.1 * r, -0.1 * r),
+			m + Vector2(0, -0.17 * r), m + Vector2(0.1 * r, -0.1 * r), m + Vector2(0.1 * r, 0)]), Color(0.08, 0.06, 0.05))
+	if village_at.has(c):
+		_draw_village(village_at[c], p, r, font)
+	if city_at.has(c):
+		_draw_city(city_at[c], p, r, font)
+	if groups.has(c):
+		_draw_unit_group(groups[c], c, r, font)
+
+
+const TREE_SPOTS := [Vector2(-0.4, -0.35), Vector2(0.28, -0.42), Vector2(-0.05, -0.1),
+	Vector2(0.45, 0.1), Vector2(-0.42, 0.22), Vector2(0.08, 0.38)]
+
+func _draw_forest(c: Vector2i, p: Vector2, r: float) -> void:
+	var h := _hash_cell(c)
+	var skip_a := h % 6
+	var skip_b := (h / 7) % 6
+	var few := zoom < 0.6       # fewer trees when zoomed far out
+	for i in TREE_SPOTS.size():
+		if i == skip_a or (few and (i == skip_b or i % 2 == 1)):
 			continue
-		var idle: bool = n == 0 and (u["mp"] <= 0.0 or u["sleep"] or u["job"] != "")
-		var feet := sp + Vector2(0, 0.5 * r)
-		var tex := _unit_texture(u["type"], n)
-		var top_y := sp.y - 0.45 * r
-		if tex != null:
-			# Nation-coloured base under the figure, then the figure (feet at 91% of the image height)
-			_draw_ellipse(feet, 0.5 * r, 0.19 * r, Color(0, 0, 0, 0.35))
-			_draw_ellipse(feet, 0.44 * r, 0.16 * r, ncol(n).darkened(0.2))
-			_draw_ellipse(feet, 0.44 * r, 0.16 * r, Color(0.1, 0.08, 0.07), 1.5 * zoom)
-			if _is_same(u, selected_unit):
-				_draw_ellipse(feet, 0.56 * r + pulse * 2.0 * zoom, 0.22 * r + pulse * zoom, Color(1, 1, 0.4), 2.0 * zoom)
-			var size := 1.9 * r
-			var rect := Rect2(feet.x - size * 0.5, feet.y - size * 0.914, size, size)
-			draw_texture_rect(tex, rect, false, Color(0.62, 0.62, 0.66) if idle else Color(1, 1, 1))
-			top_y = rect.position.y + size * 0.08
-		else:
-			# No sprite yet: round token with a letter
-			draw_circle(sp, 0.34 * r, Color(0.08, 0.08, 0.1))
-			draw_circle(sp, 0.28 * r, ncol(n).darkened(0.45) if idle else ncol(n))
-			var fs := int(clampf(15.0 * zoom, 9, 26))
-			draw_string(font, sp + Vector2(-0.3 * r, fs * 0.36), UNITS[u["type"]]["icon"],
-				HORIZONTAL_ALIGNMENT_CENTER, 0.6 * r, fs, Color(1, 1, 1) if n == 0 else Color(0.1, 0.1, 0.1))
-			if _is_same(u, selected_unit):
-				draw_arc(sp, 0.4 * r + pulse * 2.5 * zoom, 0, TAU, 24, Color(1, 1, 0.4), 2.0 * zoom)
-		if group.size() > 1:
-			var bp := feet + Vector2(0.45 * r, -0.2 * r)
-			draw_circle(bp, 0.2 * r, Color(0.1, 0.09, 0.08))
-			draw_arc(bp, 0.2 * r, 0, TAU, 16, ncol(n), 1.5 * zoom)
-			var bfs := int(clampf(12.0 * zoom, 8, 20))
-			draw_string(font, bp + Vector2(-0.2 * r, bfs * 0.36), str(group.size()), HORIZONTAL_ALIGNMENT_CENTER, 0.4 * r, bfs, Color(1, 1, 1))
-		if n != 0:
-			continue
-		var fs2 := int(clampf(12.0 * zoom, 9, 18))
-		if u["job"] != "":
-			draw_string(font, Vector2(sp.x - r, top_y), "%s %d" % [u["job"], u["job_left"]],
-				HORIZONTAL_ALIGNMENT_CENTER, r * 2, fs2, Color(1, 0.9, 0.5))
-		elif u["sleep"]:
-			draw_string(font, Vector2(sp.x + 0.3 * r, top_y), "z z", HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, Color(0.8, 0.9, 1))
+		var o: Vector2 = TREE_SPOTS[i]
+		var g := p + Vector2(o.x * r, o.y * r * TILT)
+		var s := 0.8 + float((h >> i) % 5) / 16.0
+		if not few:
+			_draw_ellipse(g + Vector2(0.06 * r, 0), 0.2 * r * s, 0.08 * r * s, Color(0, 0, 0, 0.22))
+		_draw_sprite("tree_pine" if (h >> (i + 3)) % 3 != 0 else "tree_leaf", g, r, s)
+
+
+func _draw_village(v: Dictionary, p: Vector2, r: float, font: Font) -> void:
+	var tcol: Color = TRIBES[v["tribe"]]["col"]
+	if _draw_sprite("village", p, r, 1.0, tcol) == 0.0:
+		_draw_ellipse(p, 0.5 * r, 0.5 * r * TILT, Color(tcol, 0.5))
+	if not v["visited"]:   # "?" = not visited yet (visiting gives a gift)
+		draw_string(font, p + Vector2(0.38 * r, -0.62 * r), "?", HORIZONTAL_ALIGNMENT_LEFT, -1,
+			int(clampf(20.0 * zoom, 10, 32)), Color(1, 0.95, 0.4))
+
+
+func _draw_city(city: Dictionary, p: Vector2, r: float, font: Font) -> void:
+	var n: int = city["owner"]
+	if _draw_sprite("city", p, r, 1.0, ncol(n)) == 0.0:
+		_draw_ellipse(p, 0.6 * r, 0.6 * r * TILT, ncol(n))
+	labels.append([city, p])
+
+
+func _draw_city_label(lb: Array, r: float, font: Font) -> void:
+	var city: Dictionary = lb[0]
+	var p: Vector2 = lb[1]
+	var n: int = city["owner"]
+	# Name plate in the owner's colour: "Name  pop"
+	var fs := int(clampf(14.0 * zoom, 10, 22))
+	var label := "%s  %d" % [city["name"], city["pop"]]
+	var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var top := p + Vector2(-tw * 0.5 - 6, -1.45 * r - fs)
+	draw_rect(Rect2(top + Vector2(2, 2), Vector2(tw + 12, fs + 6)), Color(0, 0, 0, 0.35))
+	draw_rect(Rect2(top, Vector2(tw + 12, fs + 6)), Color(ncol(n).darkened(0.35), 0.92))
+	draw_string(font, top + Vector2(6, fs + 1), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1))
+	if n != 0:
+		return
+	var item: String = city["build"]
+	var sub := "choose build!"
+	var sub_col := Color(1, 0.5, 0.4)
+	if item != "":
+		var per_turn: int = maxi(1, city_yield(city)["p"])
+		var left := maxi(0, build_cost(item) - int(city["prod"]))
+		sub = "%s %dt" % [_item_name(item), ceili(left / float(per_turn))]
+		sub_col = Color(0.95, 0.95, 0.95)
+	var fs2 := int(clampf(12.0 * zoom, 9, 18))
+	var sy := p.y + 0.62 * r * TILT + fs2 + 2
+	draw_string(font, Vector2(p.x - r * 3 + 1, sy + 1), sub, HORIZONTAL_ALIGNMENT_CENTER, r * 6, fs2, Color(0, 0, 0, 0.7))
+	draw_string(font, Vector2(p.x - r * 3, sy), sub, HORIZONTAL_ALIGNMENT_CENTER, r * 6, fs2, sub_col)
+
+
+# One figure per hex (the selected unit, else your own, else the first) + a count badge.
+# Clicking the hex again cycles through the stack.
+func _draw_unit_group(group: Array, c: Vector2i, r: float, font: Font) -> void:
+	var u: Dictionary = group[0]
+	for o in group:
+		if o["owner"] == 0 and u["owner"] != 0:
+			u = o
+	for o in group:
+		if _is_same(o, selected_unit):
+			u = o
+	var n: int = u["owner"]
+	var sp := world_to_screen(u["dp"])
+	if city_at.has(c):
+		sp += Vector2(0.48 * r, 0.3 * r * TILT)      # stand at the front-right of the city
+	var idle: bool = n == 0 and (u["mp"] <= 0.0 or u["sleep"] or u["job"] != "")
+	# shadow, then a nation-coloured base like a tabletop miniature
+	_draw_ellipse(sp + Vector2(0.07 * r, 0.02 * r), 0.36 * r, 0.36 * r * TILT, Color(0, 0, 0, 0.28))
+	_draw_ellipse(sp, 0.3 * r, 0.3 * r * TILT, ncol(n).darkened(0.15))
+	_draw_ellipse(sp, 0.3 * r, 0.3 * r * TILT, Color(0.1, 0.08, 0.07), 1.5 * zoom)
+	if _is_same(u, selected_unit):
+		_draw_ellipse(sp, 0.42 * r, 0.42 * r * TILT, Color(0.2, 0.15, 0.0, 0.6), 4.5 * zoom)
+		_draw_ellipse(sp, 0.42 * r, 0.42 * r * TILT, Color(1, 0.95, 0.35), 2.4 * zoom)
+	var h := _draw_sprite(u["type"], sp, r, 1.0, ncol(n), Color(0.6, 0.6, 0.64) if idle else Color(1, 1, 1))
+	var top_y := sp.y - h * 0.62
+	if h == 0.0:   # no sprite: simple token with a letter
+		draw_circle(sp + Vector2(0, -0.3 * r), 0.3 * r, ncol(n))
+		var tfs := int(clampf(15.0 * zoom, 9, 26))
+		draw_string(font, sp + Vector2(-0.3 * r, -0.3 * r + tfs * 0.36), UNITS[u["type"]]["icon"],
+			HORIZONTAL_ALIGNMENT_CENTER, 0.6 * r, tfs, Color(1, 1, 1))
+		top_y = sp.y - 0.7 * r
+	if group.size() > 1:
+		var bp := sp + Vector2(0.42 * r, -0.28 * r)
+		draw_circle(bp, 0.2 * r, Color(0.1, 0.09, 0.08))
+		draw_arc(bp, 0.2 * r, 0, TAU, 16, ncol(n), 1.5 * zoom)
+		var bfs := int(clampf(12.0 * zoom, 8, 20))
+		draw_string(font, bp + Vector2(-0.2 * r, bfs * 0.36), str(group.size()), HORIZONTAL_ALIGNMENT_CENTER, 0.4 * r, bfs, Color(1, 1, 1))
+	if n != 0:
+		return
+	var fs2 := int(clampf(12.0 * zoom, 9, 18))
+	if u["job"] != "":
+		draw_string(font, Vector2(sp.x - r, top_y), "%s %d" % [u["job"], u["job_left"]],
+			HORIZONTAL_ALIGNMENT_CENTER, r * 2, fs2, Color(1, 0.9, 0.5))
+	elif u["sleep"]:
+		draw_string(font, Vector2(sp.x + 0.35 * r, top_y + fs2), "z z", HORIZONTAL_ALIGNMENT_LEFT, -1, fs2, Color(0.8, 0.9, 1))
 
 
 func _draw_ui(font: Font, vp: Vector2) -> void:
