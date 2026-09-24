@@ -15,6 +15,8 @@ extends Node2D
 #  Lesson 10e: title screen + new-game setup (nation, map size, rivals),
 #  settings (fullscreen, UI size), sharper high-resolution rendering.
 #  Lesson 10f: city view — double-click a city / press C (hud.gd).
+#  Economy I: real population (people), staple crops, grain price and standard
+#  of living drive growth — see economy.gd. No more abstract "size" / food bucket.
 # =============================================================
 
 # Map size and game setup are chosen on the title screen (see MAP_SIZES / start_game)
@@ -31,7 +33,9 @@ const START_GOLD := 20
 
 const PAN_SPEED := 700.0
 const CITY_MIN_DIST := 4          # cities must be at least 4 hexes apart
-const FOOD_PER_POP := 2
+const Econ = preload("res://economy.gd")
+const NEW_CITY_POP := 150        # people a Colonist unit brings
+const MIN_CITY_POP := 200        # a city must keep this many people after training a unit
 
 var PLAYER_NATION := 0            # index into NATIONS (picked on the setup screen)
 var AI_COUNT := 2                 # rival colonial powers (1-3)
@@ -97,10 +101,11 @@ const GIFT_ATT := 15
 # sight = how many hexes the unit reveals. Units with a sprite in assets/units/ are drawn with it,
 # the others fall back to a round token with the icon letter.
 const UNITS := {
-	"settler": { "name": "Colonist", "mp": 2, "cost": 30, "icon": "C", "sight": 2 },
-	"worker":  { "name": "Worker",   "mp": 2, "cost": 20, "icon": "W", "sight": 2 },
-	"scout":   { "name": "Scout",    "mp": 3, "cost": 20, "icon": "S", "sight": 3 },
-	"guard":   { "name": "Guard",    "mp": 2, "cost": 25, "icon": "G", "sight": 2 },
+# people = how many inhabitants leave the city to form the unit.
+	"settler": { "name": "Colonist", "mp": 2, "cost": 30, "icon": "C", "sight": 2, "people": 150 },
+	"worker":  { "name": "Worker",   "mp": 2, "cost": 20, "icon": "W", "sight": 2, "people": 50 },
+	"scout":   { "name": "Scout",    "mp": 3, "cost": 20, "icon": "S", "sight": 3, "people": 20 },
+	"guard":   { "name": "Guard",    "mp": 2, "cost": 25, "icon": "G", "sight": 2, "people": 100 },
 }
 
 # ---- 2.5D view (must match tools/render_sprites.gd) ----
@@ -127,17 +132,17 @@ const SPRITES := {
 }
 
 const BUILDINGS := {
-	"granary":  { "name": "Granary",  "cost": 40, "desc": "+2 food" },
-	"workshop": { "name": "Workshop", "cost": 50, "desc": "+2 production" },
-	"market":   { "name": "Market",   "cost": 50, "desc": "+3 gold" },
-	"school":   { "name": "School",   "cost": 60, "desc": "+2 research" },
+	"granary":  { "name": "Granary",  "cost": 40, "desc": "Stores grain for bad years, 10 jobs" },
+	"workshop": { "name": "Workshop", "cost": 50, "desc": "+2 production, 60 jobs" },
+	"market":   { "name": "Market",   "cost": 50, "desc": "+3 gold, 60 jobs" },
+	"school":   { "name": "School",   "cost": 60, "desc": "+2 research, 20 jobs" },
 }
 const BUILD_ORDER := ["settler", "worker", "scout", "guard", "granary", "workshop", "market", "school"]   # keys 1-8
 
 const TECHS := {
-	"irrigation": { "key": "Q", "cost": 20, "desc": "Farms +1 food" },
+	"irrigation": { "key": "Q", "cost": 20, "desc": "Farms +0.2 fertility" },
 	"iron_tools": { "key": "W", "cost": 35, "desc": "Mines +1 prod, faster workers" },
-	"vaccines":   { "key": "E", "cost": 50, "desc": "No disease events" },
+	"vaccines":   { "key": "E", "cost": 50, "desc": "Plague 75% rarer, no disease events" },
 }
 
 # Worker jobs: how many turns, and which terrain allows them
@@ -741,7 +746,7 @@ func _found_city(u: Dictionary) -> bool:
 	if nat["founded"] >= names.size():
 		city_name += " II"
 	nat["founded"] += 1
-	var city := { "id": next_id, "owner": n, "name": city_name, "cell": c, "pop": 1, "food": 0, "prod": 0,
+	var city := { "id": next_id, "owner": n, "name": city_name, "cell": c, "pop": NEW_CITY_POP, "grain": 20.0, "prod": 0,
 		"build": "worker" if n == 0 else "", "blds": [], "culture": 0, "radius": 1 }
 	next_id += 1
 	cities.append(city)
@@ -805,35 +810,38 @@ func _tile_score(c: Vector2i, n: int) -> int:
 	return y.x * 4 + y.y * 2 + y.z      # citizens favour food so cities grow
 
 
+# The whole city economy for this turn (economy.gd), cached until something changes.
+# Keys used everywhere: p (production), g (gold), sci (research), worked (hexes with workers),
+# plus pop, ls, cov, price, farmers, jobs, idle... (see Econ.city_econ).
+var _econ_cache := {}
+
 func city_yield(city: Dictionary) -> Dictionary:
-	var n: int = city["owner"]
-	var center: Vector2i = city["cell"]
-	var cy := tile_yield(center, n)
-	var total := Vector3i(maxi(cy.x, 2), maxi(cy.y, 1), cy.z + 1)   # city centre: at least 2F 1P, +1 gold
-	if has_trait(n, "trade"):
-		total.z += 1
-	var options := []
-	for h in territory.keys():
-		if territory[h] == city["id"] and h != center:
-			options.append(h)
-	options.sort_custom(func(a, b): return _tile_score(a, n) > _tile_score(b, n))
-	var worked := options.slice(0, city["pop"])    # 1 citizen works 1 tile
-	for h in worked:
-		total += tile_yield(h, n)
-	var blds: Array = city["blds"]
-	if "granary" in blds: total.x += 2
-	if "workshop" in blds: total.y += 2
-	if "market" in blds: total.z += 3
-	var sci: int = 1 + int(city["pop"]) / 2 + (2 if "school" in blds else 0)
-	return { "f": total.x, "p": total.y, "g": total.z, "sci": sci,
-		"eat": int(city["pop"]) * FOOD_PER_POP, "worked": worked }
+	var sig := [turn, city["pop"], city.get("grain", 0.0), city["blds"].size(), city["radius"],
+		improvements.size(), territory.size(), nations[city["owner"]]["tech"].hash()]
+	var hit: Array = _econ_cache.get(city["id"], [])
+	if not hit.is_empty() and hit[0] == sig:
+		return hit[1]
+	var e := Econ.city_econ(self, city)
+	_econ_cache[city["id"]] = [sig, e]
+	return e
 
 
-func growth_need(city: Dictionary) -> int:
-	var need := 8 + 5 * int(city["pop"])
-	if has_trait(city["owner"], "growth"):
-		need = int(need * 0.8)
-	return need
+func tile_info(c: Vector2i, n: int = 0) -> Dictionary:
+	return Econ.tile_info(self, c, n, city_at.has(c))
+
+
+# 12480 -> "12,480"
+func fmt_int(v) -> String:
+	var t := str(absi(int(round(float(v)))))
+	var out := ""
+	while t.length() > 3:
+		out = "," + t.substr(t.length() - 3) + out
+		t = t.substr(0, t.length() - 3)
+	return ("-" if float(v) < -0.5 else "") + t + out
+
+
+func pop_total(city: Dictionary) -> int:
+	return int(city["pop"])
 
 
 func border_need(city: Dictionary) -> int:
@@ -857,14 +865,22 @@ func _item_name(item: String) -> String:
 
 
 func _can_complete(city: Dictionary, item: String) -> bool:
-	return not (item == "settler" and city["pop"] < 2)
+	return complete_problem(city, item) == ""
+
+
+# Why a unit can't leave the city yet ("" = it can). Units are real people.
+func complete_problem(city: Dictionary, item: String) -> String:
+	if UNITS.has(item):
+		var need: int = UNITS[item]["people"] + MIN_CITY_POP
+		if int(city["pop"]) < need:
+			return "A %s takes %d people; the city needs %s to spare them" % [UNITS[item]["name"], UNITS[item]["people"], fmt_int(need)]
+	return ""
 
 
 func _complete(city: Dictionary, item: String) -> void:
 	if UNITS.has(item):
 		_spawn_unit(item, city["cell"], city["owner"])
-		if item == "settler":
-			city["pop"] -= 1
+		city["pop"] = int(city["pop"]) - int(UNITS[item]["people"])
 	else:
 		city["blds"].append(item)
 	city["build"] = ""
@@ -877,19 +893,15 @@ func _process_city(city: Dictionary) -> void:
 	var y := city_yield(city)
 	nat["gold"] += y["g"]
 	nat["research"] += y["sci"]
-	# Food -> growth / starvation
-	city["food"] += y["f"] - y["eat"]
-	if city["food"] >= growth_need(city):
-		city["food"] -= growth_need(city)
-		city["pop"] += 1
-	elif city["food"] < 0:
-		city["food"] = 0
-		if city["pop"] > 1:
-			city["pop"] -= 1
-			if city["owner"] == 0:
-				_show_event("%s is starving!" % city["name"])
+	# People: births, deaths, plague, migration, granary (economy.gd)
+	var r := Econ.grow(self, city, y)
+	if city["owner"] == 0:
+		if r["plague"] > 0:
+			_show_event("Plague in %s!  %s dead" % [city["name"], fmt_int(r["plague"])])
+		elif y["cov"] < 0.9:
+			_show_event("Famine in %s!  Only %d%% of the food it needs" % [city["name"], int(y["cov"] * 100)])
 	# Culture -> borders grow (radius 1 -> 2 -> 3)
-	city["culture"] += 1 + int(city["pop"]) / 2
+	city["culture"] += 1 + int(city["pop"]) / 1000
 	if city["radius"] < 3 and city["culture"] >= border_need(city):
 		city["culture"] = 0
 		city["radius"] += 1
@@ -909,7 +921,7 @@ func _buy(city: Dictionary) -> void:
 	if item == "":
 		_show_message("Choose something to build first (1-8)"); return
 	if not _can_complete(city, item):
-		_show_message("A Colonist needs a city of size 2+"); return
+		_show_message(complete_problem(city, item)); return
 	var cost: int = (build_cost(item) - int(city["prod"])) * 2
 	if cost <= 0:
 		_show_message("Already paid — it finishes at end of turn"); return
@@ -970,9 +982,9 @@ func _visit_village(v: Dictionary, u: Dictionary) -> void:
 				me()["gold"] += g2
 				_show_event("The %s trade furs with %s:  +%d gold" % [tname, who, g2])
 			else:
-				var fd := int(12 * bonus)
-				city["food"] += fd
-				_show_event("The %s share food with %s:  +%d food" % [tname, city["name"], fd])
+				var fd := int(40 * bonus)
+				city["grain"] = float(city.get("grain", 0.0)) + fd
+				_show_event("The %s share corn with %s:  +%d t of grain" % [tname, city["name"], fd])
 
 
 func _gift(n: int, t: int) -> bool:
@@ -1099,7 +1111,7 @@ func _ai_pick_build(n: int, city: Dictionary) -> String:
 	for b in ["granary", "market", "workshop", "school"]:
 		if not (b in city["blds"]):
 			return b
-	if int(city["pop"]) >= 4 and count["city"] + count["settler"] < max_c:
+	if int(city["pop"]) >= 1500 and count["city"] + count["settler"] < max_c:
 		return "settler"
 	return ""
 
@@ -1326,13 +1338,19 @@ func _trigger_event() -> void:
 	if not me()["tech"]["vaccines"]:
 		pool.append("disease")
 	match pool[randi() % pool.size()]:
-		"harvest":  city["food"] += 15; _show_event("Bountiful harvest in %s!  +15 food" % city["name"])
+		"harvest":
+			var t := int(city["pop"]) * 0.15
+			city["grain"] = float(city.get("grain", 0.0)) + t
+			_show_event("Bountiful harvest in %s!  +%s t of grain" % [city["name"], fmt_int(t)])
 		"ship":     me()["gold"] += 30; _show_event("Merchant ship from Europe!  +30 gold")
-		"migrants": city["pop"] += 1; _show_event("Migrants settle in %s!  +1 pop" % city["name"])
+		"migrants":
+			var m := randi_range(80, 200)
+			city["pop"] = int(city["pop"]) + m
+			_show_event("A ship of migrants settles in %s!  +%d people" % [city["name"], m])
 		"disease":
-			if city["pop"] > 1:
-				city["pop"] -= 1
-				_show_event("Disease in %s!  -1 pop" % city["name"])
+			var d := int(int(city["pop"]) * randf_range(0.02, 0.05))
+			city["pop"] = maxi(Econ.MIN_POP, int(city["pop"]) - d)
+			_show_event("Disease in %s!  %s dead" % [city["name"], fmt_int(d)])
 		"fire":
 			var blds: Array = city["blds"]
 			if not blds.is_empty():
@@ -1368,7 +1386,7 @@ func score(n: int) -> int:
 	var techs := 0
 	for k in TECHS.keys():
 		if nations[n]["tech"][k]: techs += 1
-	return pop * 4 + count * 10 + land + techs * 10 + int(nations[n]["gold"]) / 20
+	return pop / 125 + count * 10 + land + techs * 10 + int(nations[n]["gold"]) / 20
 
 
 func ranking() -> Array:
@@ -1762,8 +1780,13 @@ func _load_game() -> void:
 	for d in data["cities"]:
 		var city: Dictionary = d
 		city["cell"] = _v(d["cell"])
-		for key in ["id", "owner", "pop", "food", "prod", "culture", "radius"]:
+		for key in ["id", "owner", "pop", "prod", "culture", "radius"]:
 			city[key] = int(d[key])
+		if not d.has("grain"):                                       # pre-Economy saves: size -> people
+			city["pop"] = maxi(NEW_CITY_POP, int(city["pop"]) * 500)
+			city["grain"] = float(d.get("food", 0)) * 10.0
+			city.erase("food")
+		city["grain"] = float(city["grain"])
 		if city["build"] == "soldier": city["build"] = "guard"     # Lesson 10 saves
 		cities.append(city)
 		city_at[city["cell"]] = city
@@ -2086,32 +2109,93 @@ func _draw_city(city: Dictionary, p: Vector2, r: float, font: Font) -> void:
 	labels.append([city, p])
 
 
+# 4X-style city banner: [population medallion | NAME | production], a production bar under it.
+# The medallion ring is green when the city grew last turn, red when it shrank.
+func _short_pop(v: int) -> String:
+	if v < 1000: return str(v)
+	if v < 10000: return "%.1fk" % (v / 1000.0)
+	return "%dk" % (v / 1000)
+
+
 func _draw_city_label(lb: Array, r: float, font: Font) -> void:
 	var city: Dictionary = lb[0]
 	var p: Vector2 = lb[1]
 	var n: int = city["owner"]
-	# Name plate in the owner's colour: "Name  pop"
+	var mine := n == 0
 	var fs := int(clampf(14.0 * zoom, 10, 22))
-	var label := "%s  %d" % [city["name"], city["pop"]]
-	var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-	var top := p + Vector2(-tw * 0.5 - 6, -1.45 * r - fs)
-	draw_rect(Rect2(top + Vector2(2, 2), Vector2(tw + 12, fs + 6)), Color(0, 0, 0, 0.35))
-	draw_rect(Rect2(top, Vector2(tw + 12, fs + 6)), Color(ncol(n).darkened(0.35), 0.92))
-	draw_string(font, top + Vector2(6, fs + 1), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1))
-	if n != 0:
-		return
+	var h := fs + 10.0
+	var name_w := font.get_string_size(city["name"], HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var item: String = city["build"]
-	var sub := "choose build!"
-	var sub_col := Color(1, 0.5, 0.4)
-	if item != "":
-		var per_turn: int = maxi(1, city_yield(city)["p"])
-		var left := maxi(0, build_cost(item) - int(city["prod"]))
-		sub = "%s %dt" % [_item_name(item), ceili(left / float(per_turn))]
-		sub_col = Color(0.95, 0.95, 0.95)
-	var fs2 := int(clampf(12.0 * zoom, 9, 18))
-	var sy := p.y + 0.62 * r * TILT + fs2 + 2
-	draw_string(font, Vector2(p.x - r * 3 + 1, sy + 1), sub, HORIZONTAL_ALIGNMENT_CENTER, r * 6, fs2, Color(0, 0, 0, 0.7))
-	draw_string(font, Vector2(p.x - r * 3, sy), sub, HORIZONTAL_ALIGNMENT_CENTER, r * 6, fs2, sub_col)
+	var right_txt := ""
+	var per_turn := 1
+	if mine:
+		if item == "":
+			right_txt = "!"
+		else:
+			per_turn = maxi(1, city_yield(city)["p"])
+			right_txt = str(ceili(maxi(0, build_cost(item) - int(city["prod"])) / float(per_turn)))
+	var right_w := (h * 0.7 + font.get_string_size(right_txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs - 2).x + 8) if mine else 0.0
+	var pad := h * 0.62                       # room for the medallion overlapping the left end
+	var w := pad + name_w + 14 + right_w
+	var top := p + Vector2(-w * 0.5 + h * 0.3, -1.45 * r - h)
+	var rect := Rect2(top, Vector2(w, h))
+	var col := ncol(n)
+	# body: nation colour, dark rim, thin gold edge
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(col.darkened(0.45), 0.93)
+	sb.border_color = Color(1.0, 0.84, 0.5, 0.9)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(int(h * 0.5))
+	sb.shadow_color = Color(0, 0, 0, 0.45)
+	sb.shadow_size = 3
+	sb.shadow_offset = Vector2(1, 2)
+	sb.anti_aliasing = true
+	draw_style_box(sb, rect)
+	# glossy highlight on the upper half
+	var gl := StyleBoxFlat.new()
+	gl.bg_color = Color(1, 1, 1, 0.13)
+	gl.set_corner_radius_all(int(h * 0.4))
+	gl.anti_aliasing = true
+	draw_style_box(gl, Rect2(top + Vector2(3, 2), Vector2(w - 6, h * 0.45)))
+	var ty := top.y + h * 0.5 + fs * 0.36
+	_shadow_text(font, Vector2(top.x + pad + 6, ty), city["name"], fs, Color(1, 1, 1))
+	# production (your cities): hammer + turns left, "!" when nothing is being built
+	if mine:
+		var ix := top.x + w - right_w
+		draw_line(Vector2(ix, top.y + 4), Vector2(ix, top.y + h - 4), Color(1, 1, 1, 0.25), 1.0)
+		var icon: Texture2D = hud.icons.get("production") if hud != null else null
+		if icon != null:
+			var isz := h * 0.62
+			draw_texture_rect(icon, Rect2(ix + 4, top.y + (h - isz) * 0.5, isz, isz), false)
+		_shadow_text(font, Vector2(ix + h * 0.7 + 4, ty - 1), right_txt, fs - 2,
+			Color(1, 0.5, 0.4) if item == "" else Color(1, 0.86, 0.5))
+	# population medallion
+	var mc := top + Vector2(h * 0.18, h * 0.5)
+	var mr := h * 0.66
+	var ring := Color(1.0, 0.82, 0.45)
+	var last: Dictionary = city.get("last", {})
+	if mine and not last.is_empty():
+		ring = Color(0.45, 0.95, 0.4) if last["pct"] > 0.05 else (Color(1, 0.4, 0.35) if last["pct"] < -0.05 else ring)
+	draw_circle(mc + Vector2(1, 2), mr + 1.5, Color(0, 0, 0, 0.45))
+	draw_circle(mc, mr + 1.5, Color(0.05, 0.06, 0.08))
+	draw_circle(mc, mr, ring)
+	draw_circle(mc, mr - 2.5 * clampf(zoom, 0.8, 1.6), col.darkened(0.25))
+	draw_circle(mc + Vector2(0, -mr * 0.3), mr * 0.55, Color(1, 1, 1, 0.12))
+	var ptxt := _short_pop(int(city["pop"]))
+	var pfs := int(fs * (0.82 if ptxt.length() <= 3 else 0.7))
+	var pw := font.get_string_size(ptxt, HORIZONTAL_ALIGNMENT_LEFT, -1, pfs).x
+	_shadow_text(font, Vector2(mc.x - pw * 0.5, mc.y + pfs * 0.36), ptxt, pfs, Color(1, 1, 1))
+	# production bar under the banner
+	if mine and item != "":
+		var bw := w - pad - 10
+		var br := Rect2(Vector2(top.x + pad, top.y + h + 2), Vector2(bw, maxf(3.0, 4.0 * zoom)))
+		draw_rect(br.grow(1), Color(0, 0, 0, 0.7))
+		draw_rect(Rect2(br.position, Vector2(bw * clampf(float(city["prod"]) / build_cost(item), 0, 1), br.size.y)), Color(0.95, 0.6, 0.2))
+
+
+func _shadow_text(font: Font, pos: Vector2, text: String, fs: int, col: Color) -> void:
+	draw_string(font, pos + Vector2(1, 1.5), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0, 0, 0, 0.8))
+	draw_string(font, pos, text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
 
 
 # One figure per hex (the selected unit, else your own, else the first) + a count badge.

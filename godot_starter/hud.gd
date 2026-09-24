@@ -2,8 +2,10 @@ extends CanvasLayer
 # =============================================================
 #  Colony Empire — HUD (Lesson 10d)
 #  Every on-screen panel is a real Godot Control node, styled by
-#  a Theme built in code: dark wood panels, brass trim,
-#  parchment text, Cinzel titles + Alegreya Sans body text.
+#  a Theme built in code.  Lesson 11b: classic 4X strategy skin —
+#  slate-blue glass panels with bevelled gold frames, glossy
+#  buttons and bars (9-slice images from tools/make_ui_skin.py),
+#  white text with drop shadows, Cinzel titles + Alegreya Sans.
 #
 #  The HUD never changes the game directly: its buttons send the
 #  same key codes as the keyboard (game._on_key), so each action
@@ -13,19 +15,25 @@ extends CanvasLayer
 var game      # main.gd — set by main before add_child()
 
 # ---- palette ----
-const C_BG := Color(0.105, 0.09, 0.075, 0.94)
-const C_BG2 := Color(0.17, 0.145, 0.11, 0.96)
-const C_INSET := Color(0.06, 0.05, 0.04, 0.6)
-const C_BRASS := Color(0.72, 0.58, 0.34)
-const C_BRASS_HI := Color(0.95, 0.8, 0.47)
-const C_TEXT := Color(0.95, 0.91, 0.82)
-const C_DIM := Color(0.7, 0.64, 0.54)
-const C_GOOD := Color(0.58, 0.86, 0.47)
-const C_BAD := Color(0.95, 0.5, 0.4)
+const C_BG := Color(0.075, 0.105, 0.15, 0.94)
+const C_BG2 := Color(0.12, 0.16, 0.22, 0.96)
+const C_INSET := Color(0.02, 0.035, 0.06, 0.7)
+const C_BRASS := Color(0.8, 0.65, 0.36)
+const C_BRASS_HI := Color(1.0, 0.86, 0.5)
+const C_TEXT := Color(0.95, 0.96, 0.98)
+const C_DIM := Color(0.66, 0.73, 0.82)
+const C_GOOD := Color(0.55, 0.9, 0.45)
+const C_BAD := Color(1.0, 0.45, 0.38)
 const C_FOOD := Color(0.45, 0.74, 0.3)
 const C_PROD := Color(0.86, 0.55, 0.22)
 const C_SCI := Color(0.38, 0.6, 0.95)
 const C_GOLD := Color(0.95, 0.76, 0.3)
+
+# 9-slice skin images (assets/ui/skin_*.png): how many pixels of each edge must not stretch
+const SKIN_MARGIN := { "panel": 14, "window": 16, "tooltip": 7, "card": 9, "card_on": 9, "inset": 7,
+	"event": 8, "event_bad": 8, "button": 9, "button_hover": 9, "button_pressed": 9, "button_disabled": 9,
+	"button_on": 10, "gold": 11, "gold_hover": 11, "gold_pressed": 11, "bar_bg": 6, "bar_fill": 6, "medal": 20 }
+var skins := {}
 
 const BUILD_ICONS := { "granary": "food", "workshop": "production", "market": "gold", "school": "research" }
 
@@ -84,6 +92,9 @@ func _ready() -> void:
 	f_title = fv
 	for n in ["gold", "research", "food", "production", "population", "score", "year", "city", "culture", "moves", "diplomacy"]:
 		icons[n] = load("res://assets/ui/icon_%s.png" % n)
+	for n in SKIN_MARGIN.keys():
+		skins[n] = load("res://assets/ui/skin_%s.png" % n)
+	skins["topbar"] = load("res://assets/ui/skin_topbar.png")
 	root = Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -121,28 +132,56 @@ func _box(bg: Color, border: Color, bw: int, radius: int, margin: float, shadow 
 	return sb
 
 
+# A 9-slice image style. margin = content padding (-1: automatic), tint multiplies the image.
+func _skin(name: String, margin := -1.0, tint := Color(1, 1, 1)) -> StyleBoxTexture:
+	var sb := StyleBoxTexture.new()
+	sb.texture = skins[name]
+	var m: int = SKIN_MARGIN.get(name, 8)
+	sb.set_texture_margin_all(m)
+	sb.set_content_margin_all(margin if margin >= 0.0 else m * 0.75)
+	sb.modulate_color = tint
+	return sb
+
+
+func _gold_button(b: Button) -> void:
+	b.add_theme_stylebox_override("normal", _skin("gold", 8))
+	b.add_theme_stylebox_override("hover", _skin("gold_hover", 8))
+	b.add_theme_stylebox_override("pressed", _skin("gold_pressed", 8))
+	b.add_theme_stylebox_override("disabled", _skin("button_disabled", 8))
+	for k in ["font_color", "font_hover_color", "font_pressed_color"]:
+		b.add_theme_color_override(k, Color(0.2, 0.11, 0.02))
+	b.add_theme_color_override("font_outline_color", Color(1, 0.93, 0.7, 0.55))
+	b.add_theme_constant_override("outline_size", 2)
+
+
 func _make_theme() -> Theme:
 	var th := Theme.new()
 	th.default_font = f_body
 	th.default_font_size = 16
 	th.set_color("font_color", "Label", C_TEXT)
-	th.set_stylebox("panel", "PanelContainer", _box(C_BG, C_BRASS, 2, 8, 10, 8))
-	# buttons: dark leather with a brass edge that lights up on hover
-	th.set_stylebox("normal", "Button", _box(Color(0.24, 0.195, 0.14), Color(0.45, 0.36, 0.22), 1, 6, 7))
-	th.set_stylebox("hover", "Button", _box(Color(0.32, 0.26, 0.18), C_BRASS_HI, 1, 6, 7))
-	th.set_stylebox("pressed", "Button", _box(Color(0.16, 0.13, 0.09), C_BRASS, 1, 6, 7))
-	th.set_stylebox("disabled", "Button", _box(Color(0.15, 0.13, 0.11, 0.8), Color(0.3, 0.26, 0.2), 1, 6, 7))
+	th.set_color("font_shadow_color", "Label", Color(0, 0, 0, 0.8))
+	th.set_constant("shadow_offset_x", "Label", 1)
+	th.set_constant("shadow_offset_y", "Label", 2)
+	th.set_stylebox("panel", "PanelContainer", _skin("panel", 12))
+	# buttons: glossy steel-blue with a gold rim that lights up on hover
+	th.set_stylebox("normal", "Button", _skin("button", 7))
+	th.set_stylebox("hover", "Button", _skin("button_hover", 7))
+	th.set_stylebox("pressed", "Button", _skin("button_pressed", 7))
+	th.set_stylebox("hover_pressed", "Button", _skin("button_on", 7))
+	th.set_stylebox("disabled", "Button", _skin("button_disabled", 7))
 	th.set_stylebox("focus", "Button", StyleBoxEmpty.new())
 	th.set_color("font_color", "Button", C_TEXT)
-	th.set_color("font_hover_color", "Button", Color(1, 0.96, 0.86))
+	th.set_color("font_hover_color", "Button", Color(1, 0.97, 0.88))
 	th.set_color("font_pressed_color", "Button", C_BRASS_HI)
-	th.set_color("font_disabled_color", "Button", Color(0.5, 0.46, 0.4))
+	th.set_color("font_disabled_color", "Button", Color(0.55, 0.57, 0.6))
+	th.set_color("font_outline_color", "Button", Color(0, 0, 0, 0.6))
+	th.set_constant("outline_size", "Button", 3)
 	th.set_constant("icon_max_width", "Button", 22)
 	th.set_constant("h_separation", "Button", 6)
 	th.set_font("font", "Button", f_bold)
-	th.set_stylebox("background", "ProgressBar", _box(Color(0, 0, 0, 0.45), Color(0.3, 0.25, 0.18), 1, 5, 0))
-	th.set_stylebox("fill", "ProgressBar", _box(C_GOOD, Color(0, 0, 0, 0), 0, 5, 0))
-	th.set_stylebox("panel", "TooltipPanel", _box(Color(0.08, 0.07, 0.06, 0.97), C_BRASS, 1, 5, 8))
+	th.set_stylebox("background", "ProgressBar", _skin("bar_bg", 0))
+	th.set_stylebox("fill", "ProgressBar", _skin("bar_fill", 0, C_GOOD))
+	th.set_stylebox("panel", "TooltipPanel", _skin("tooltip", 9))
 	th.set_color("font_color", "TooltipLabel", C_TEXT)
 	th.set_font("font", "TooltipLabel", f_body)
 	th.set_font_size("font_size", "TooltipLabel", 15)
@@ -210,6 +249,31 @@ func _press(key: int) -> void:
 	refresh(true)
 
 
+# ---- Economy I helpers: standard of living, food, growth (economy.gd)
+func _ls_word(ls: float) -> String:
+	if ls < 0.6: return "Destitute"
+	if ls < 0.9: return "Poor"
+	if ls < 1.1: return "Getting by"
+	if ls < 1.5: return "Comfortable"
+	return "Prosperous"
+
+
+func _ls_col(ls: float) -> Color:
+	return C_BAD if ls < 0.9 else (C_TEXT if ls < 1.1 else C_GOOD)
+
+
+func _food_text(y: Dictionary) -> String:
+	return "Fed %d%%   ·   grain %d / t   ·   granary %s / %s t" % [int(y["cov"] * 100), int(round(y["price"])),
+		game.fmt_int(y["stock"]), game.fmt_int(y["stock_cap"])]
+
+
+func _growth_text(city: Dictionary) -> String:
+	var r: Dictionary = city.get("last", {})
+	if r.is_empty():
+		return "Newly founded"
+	return "%+.1f%% last turn  (%s people)" % [r["pct"], ("+" if r["change"] >= 0 else "") + game.fmt_int(r["change"])]
+
+
 func _stat(icon_name: String, text: String, col := C_TEXT, size := 16) -> HBoxContainer:
 	var hb := _hbox(4)
 	hb.add_child(_icon(icon_name, 20))
@@ -226,7 +290,7 @@ func _bar(col: Color, value: float, max_value: float, text: String) -> ProgressB
 	pb.custom_minimum_size = Vector2(0, 22)
 	pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	pb.add_theme_stylebox_override("fill", _box(col, col.lightened(0.25), 0, 5, 0))
+	pb.add_theme_stylebox_override("fill", _skin("bar_fill", 0, col.lightened(0.1)))
 	var l := _label(text, 14, Color(1, 1, 1), f_bold)
 	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -273,10 +337,14 @@ func _portrait_col(type: String, col: Color) -> Texture2D:
 # =============================================================
 func _build_top_bar() -> void:
 	var bar := PanelContainer.new()
-	var sb := _box(Color(0.09, 0.075, 0.06, 0.95), C_BRASS, 0, 0, 8, 10)
-	sb.border_width_bottom = 2
-	sb.content_margin_left = 14
-	sb.content_margin_right = 14
+	var sb := StyleBoxTexture.new()
+	sb.texture = skins["topbar"]
+	sb.texture_margin_bottom = 10
+	sb.texture_margin_top = 2
+	sb.content_margin_left = 16
+	sb.content_margin_right = 16
+	sb.content_margin_top = 7
+	sb.content_margin_bottom = 13
 	bar.add_theme_stylebox_override("panel", sb)
 	ui.add_child(bar)
 	bar.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -345,14 +413,14 @@ func _update_top() -> void:
 			inc_g += y["g"]
 			inc_r += y["sci"]
 	var col: Color = game.ncol(0)
-	badge.add_theme_stylebox_override("panel", _box(col.darkened(0.2), Color(1, 1, 1, 0.8), 2, 17, 0))
+	badge.add_theme_stylebox_override("panel", _box(col.darkened(0.15), C_BRASS_HI, 2, 17, 0))
 	var nname: String = game.ndef(0)["name"]
 	badge_letter.text = nname.substr(0, 1)
 	nation_label.text = nname
 	_set_chip("year", "%d AD" % game.year(), "turn %d" % game.turn, C_DIM)
 	_set_chip("gold", str(me["gold"]), "%+d" % inc_g, C_GOOD if inc_g >= 0 else C_BAD)
 	_set_chip("research", str(me["research"]), "%+d" % inc_r, C_SCI.lightened(0.3))
-	_set_chip("population", str(pop), "", C_DIM)
+	_set_chip("population", game.fmt_int(pop), "people", C_DIM)
 	_set_chip("city", str(count), "", C_DIM)
 	var rank: int = game.ranking().find(0) + 1
 	_set_chip("score", str(game.score(0)), "#%d of %d" % [rank, game.nations.size()], C_GOOD if rank == 1 else C_DIM)
@@ -371,7 +439,10 @@ func _set_chip(key: String, value: String, delta: String, delta_col: Color) -> v
 # =============================================================
 func _build_toast() -> void:
 	toast = PanelContainer.new()
-	toast.add_theme_stylebox_override("panel", _box(Color(0.08, 0.07, 0.06, 0.9), C_BRASS, 1, 16, 8, 6))
+	var tsb := _skin("panel", 10)
+	tsb.content_margin_left = 22
+	tsb.content_margin_right = 22
+	toast.add_theme_stylebox_override("panel", tsb)
 	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(toast)
 	toast.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
@@ -412,8 +483,8 @@ func push_event(text: String) -> void:
 		if text.contains(w):
 			bad = true
 	var p := PanelContainer.new()
-	var sb := _box(Color(0.1, 0.085, 0.07, 0.9), C_BAD if bad else C_BRASS_HI, 0, 6, 8, 4)
-	sb.border_width_left = 4
+	var sb := _skin("event_bad" if bad else "event", 8)
+	sb.content_margin_left = 12
 	p.add_theme_stylebox_override("panel", sb)
 	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var l := _label(text, 15, C_TEXT)
@@ -454,7 +525,7 @@ func _sel_sig() -> Array:
 		return ["u", u["id"], u["cell"], u["mp"], u["job"], u["job_left"], u["sleep"], me["gold"]]
 	var c: Dictionary = game.selected_city
 	if not c.is_empty():
-		return ["c", c["id"], c["build"], c["prod"], c["food"], c["pop"], c["blds"].size(), c["radius"], me["gold"], game.turn]
+		return ["c", c["id"], c["build"], c["prod"], c["grain"], c["pop"], c["blds"].size(), c["radius"], me["gold"], game.turn]
 	return []
 
 
@@ -512,7 +583,7 @@ func _unit_panel(u: Dictionary) -> void:
 			"settler": status = "Founds new cities. Needs open land 4+ hexes from other cities."
 			"worker": status = "Improves land inside your borders."
 			"scout": status = "Sees 3 hexes. Village chiefs give scouts bigger gifts."
-			"guard": status = "Protects your cities. (Combat arrives in Lesson 11)"
+			"guard": status = "Protects your cities. (Combat arrives in a later lesson)"
 	var sl := _label(status, 15, C_DIM)
 	sl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	sl.custom_minimum_size = Vector2(360, 0)
@@ -562,23 +633,16 @@ func _city_panel(city: Dictionary) -> void:
 	var nm := _label(city["name"], 26, C_BRASS_HI, f_title)
 	nm.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(nm)
-	head.add_child(_stat("population", "Size %d" % city["pop"]))
+	head.add_child(_stat("population", game.fmt_int(city["pop"])))
 	head.add_child(_stat("culture", "Borders %d" % city["radius"], C_DIM))
 	var open := _button("City View  [C]", 0, "city", "Open the city (or double-click it on the map)")
 	open.pressed.connect(open_city_view)
 	head.add_child(open)
 	sel_box.add_child(head)
 	# growth and production bars
-	var net: int = y["f"] - y["eat"]
-	var need: int = game.growth_need(city)
-	var grow := ""
-	if net > 0:
-		grow = "  ·  grows in %d" % _turns(need - city["food"], net)
-	elif net < 0:
-		grow = "  ·  starving!"
 	var r1 := _hbox(8)
 	r1.add_child(_icon("food", 22))
-	r1.add_child(_bar(C_FOOD, city["food"], need, "Food %d / %d   (%+d)%s" % [city["food"], need, net, grow]))
+	r1.add_child(_bar(C_FOOD if y["cov"] >= 1.0 else C_BAD, y["cov"] * 100.0, 100, _food_text(y)))
 	sel_box.add_child(r1)
 	var item: String = city["build"]
 	var r2 := _hbox(8)
@@ -593,7 +657,10 @@ func _city_panel(city: Dictionary) -> void:
 	sel_box.add_child(r2)
 	# yields
 	var yr := _hbox(18)
-	yr.add_child(_stat("food", "%+d" % net, C_GOOD if net >= 0 else C_BAD))
+	var ls: float = y["ls"]
+	var lsl := _stat("population", "%s %.2f   ·   %s" % [_ls_word(ls), ls, _growth_text(city)], _ls_col(ls))
+	lsl.tooltip_text = "Standard of living = income per person ÷ cost of living"
+	yr.add_child(lsl)
 	yr.add_child(_stat("production", "+%d" % y["p"]))
 	yr.add_child(_stat("gold", "+%d" % y["g"]))
 	yr.add_child(_stat("research", "+%d" % y["sci"]))
@@ -622,14 +689,16 @@ func _city_panel(city: Dictionary) -> void:
 		if game.UNITS.has(key):
 			b.icon = _portrait(key, 0)
 			b.add_theme_constant_override("icon_max_width", 34)
+			var why: String = game.complete_problem(city, key)
+			b.tooltip_text = "%s — takes %d people from the city%s" % [game._item_name(key), game.UNITS[key]["people"], ("\n" + why) if why != "" else ""]
 		else:
 			b.icon = icons[BUILD_ICONS[key]]
 			b.tooltip_text = game.BUILDINGS[key]["desc"]
 		if built:
 			b.disabled = true
 		if key == item:
-			b.add_theme_stylebox_override("normal", _box(Color(0.36, 0.28, 0.14), C_BRASS_HI, 2, 6, 6))
-			b.add_theme_stylebox_override("hover", _box(Color(0.42, 0.33, 0.17), C_BRASS_HI, 2, 6, 6))
+			b.add_theme_stylebox_override("normal", _skin("button_on", 6))
+			b.add_theme_stylebox_override("hover", _skin("button_on", 6))
 		b.tooltip_text = ("[%d]  " % (i + 1)) + (b.tooltip_text if b.tooltip_text != "" else game._item_name(key))
 		grid.add_child(b)
 	# buy
@@ -641,7 +710,7 @@ func _city_panel(city: Dictionary) -> void:
 			buy.tooltip_text = "Not enough gold"
 		elif not game._can_complete(city, item):
 			buy.disabled = true
-			buy.tooltip_text = "A Colonist needs a city of size 2+"
+			buy.tooltip_text = game.complete_problem(city, item)
 		sel_box.add_child(buy)
 
 
@@ -658,7 +727,7 @@ func _build_right_column() -> void:
 	col.custom_minimum_size = Vector2(280, 0)
 	# hovered hex info
 	tile_panel = PanelContainer.new()
-	tile_panel.add_theme_stylebox_override("panel", _box(C_BG, Color(C_BRASS, 0.6), 1, 8, 8, 4))
+	tile_panel.add_theme_stylebox_override("panel", _skin("panel", 11))
 	tile_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var tv := _vbox(3)
 	tile_panel.add_child(tv)
@@ -677,11 +746,7 @@ func _build_right_column() -> void:
 	end_btn.custom_minimum_size = Vector2(280, 56)
 	end_btn.add_theme_font_override("font", f_title)
 	end_btn.add_theme_font_size_override("font_size", 21)
-	end_btn.add_theme_stylebox_override("normal", _box(Color(0.72, 0.55, 0.22), Color(1, 0.88, 0.55), 2, 8, 8, 6))
-	end_btn.add_theme_stylebox_override("hover", _box(Color(0.82, 0.64, 0.28), Color(1, 0.93, 0.7), 2, 8, 8, 6))
-	end_btn.add_theme_stylebox_override("pressed", _box(Color(0.58, 0.43, 0.16), Color(1, 0.88, 0.55), 2, 8, 8, 2))
-	for k in ["font_color", "font_hover_color", "font_pressed_color"]:
-		end_btn.add_theme_color_override(k, Color(0.16, 0.1, 0.04))
+	_gold_button(end_btn)
 	end_btn.tooltip_text = "Enter: end the turn   ·   Tab: next unit"
 	end_btn.pressed.connect(_on_end_pressed)
 	col.add_child(end_btn)
@@ -692,7 +757,7 @@ func _build_right_column() -> void:
 	col.add_child(end_any)
 	# minimap
 	var mp := PanelContainer.new()
-	mp.add_theme_stylebox_override("panel", _box(C_BG, C_BRASS, 2, 8, 4, 6))
+	mp.add_theme_stylebox_override("panel", _skin("panel", 7))
 	col.add_child(mp)
 	mini = Control.new()
 	mini.custom_minimum_size = Vector2(270, 126)
@@ -741,11 +806,17 @@ func _update_tile_info() -> void:
 		tile_yields.add_child(_stat("diplomacy", "Attitude %d  (%s)" % [a, game.mood(a)], C_GOOD if a >= game.TRADE_ATT else (C_BAD if a < 0 else C_TEXT)))
 		tile_note.text = "Walk next to it to visit." if not v["visited"] else "Already visited.  [T] next to it: gift %d gold." % game.GIFT_GOLD
 		return
-	var ty: Vector3i = game.tile_yield(c)
+	var ti: Dictionary = game.tile_info(c)
 	tile_title.text = game.TERRAIN[game.terrain[c]]["name"]
-	tile_yields.add_child(_stat("food", str(ty.x)))
-	tile_yields.add_child(_stat("production", str(ty.y)))
-	tile_yields.add_child(_stat("gold", str(ty.z)))
+	if ti["cap"] > 0:
+		var crop: Dictionary = game.Econ.CROPS[ti["crop"]]
+		var st := _stat("food", "%s  %.1f t × %d" % [crop["name"], crop["t"] * ti["fert"], ti["cap"]])
+		st.tooltip_text = "%s: %.1f t a year per worker, room for %d workers" % [crop["name"], crop["t"] * ti["fert"], ti["cap"]]
+		tile_yields.add_child(st)
+	if ti["prod_cap"] > 0:
+		tile_yields.add_child(_stat("production", "%d workers" % ti["prod_cap"]))
+	if ti["cap"] == 0 and ti["prod_cap"] == 0:
+		tile_yields.add_child(_label("Nothing to work here", 14, C_DIM))
 	var notes := []
 	if game.improvements.has(c): notes.append(str(game.improvements[c]).capitalize())
 	if game.roads.has(c): notes.append("Road")
@@ -827,7 +898,7 @@ func _minimap_input(ev: InputEvent) -> void:
 # =============================================================
 func _window(title: String, width: float, closable := true) -> Array:
 	var p := PanelContainer.new()
-	p.add_theme_stylebox_override("panel", _box(C_BG, C_BRASS, 2, 10, 18, 18))
+	p.add_theme_stylebox_override("panel", _skin("window", 20))
 	ui.add_child(p)
 	p.custom_minimum_size = Vector2(width, 0)
 	var v := _vbox(12)
@@ -967,7 +1038,7 @@ func _rebuild_tech() -> void:
 		var t: Dictionary = game.TECHS[key]
 		var owned: bool = me["tech"][key]
 		var card := PanelContainer.new()
-		card.add_theme_stylebox_override("panel", _box(C_BG2, C_GOOD if owned else Color(C_BRASS, 0.6), 2 if owned else 1, 8, 12))
+		card.add_theme_stylebox_override("panel", _skin("card_on" if owned else "card", 12))
 		card.custom_minimum_size = Vector2(228, 0)
 		var v := _vbox(8)
 		card.add_child(v)
@@ -1019,7 +1090,7 @@ func _rebuild_diplomacy() -> void:
 				pop += city["pop"]
 		g.add_child(_label("You" if n == 0 else "Peace", 15, C_BRASS_HI if n == 0 else C_GOOD))
 		g.add_child(_label(str(cs), 15))
-		g.add_child(_label(str(pop), 15))
+		g.add_child(_label(game.fmt_int(pop), 15))
 		g.add_child(_label(str(game.score(n)), 15))
 		g.add_child(_label(game.ndef(n)["desc"], 14, C_DIM))
 	diplo_body.add_child(_divider())
@@ -1074,7 +1145,7 @@ func _rebuild_game_over() -> void:
 		g.add_child(_label(game.ndef(n)["name"] + ("  (you)" if n == 0 else ""), 18, game.ncol(n), f_bold))
 		g.add_child(_label(str(game.score(n)), 18, C_TEXT, f_bold))
 	over_body.add_child(g)
-	over_body.add_child(_label("Score = population x4 + cities x10 + land + technologies x10 + gold / 20", 14, C_DIM))
+	over_body.add_child(_label("Score = population / 125 + cities x10 + land + technologies x10 + gold / 20", 14, C_DIM))
 	var row := _hbox(10)
 	var b := _button("Play Again  [F2]", KEY_F2)
 	b.custom_minimum_size = Vector2(200, 42)
@@ -1233,9 +1304,9 @@ func _menu_button(text: String) -> Button:
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.add_theme_font_override("font", f_title)
 	b.add_theme_font_size_override("font_size", 24)
-	var normal := _box(Color(0.16, 0.13, 0.09, 0.82), Color(C_BRASS, 0.45), 1, 6, 16)
+	var normal := _skin("button", 14)
 	normal.content_margin_left = 24
-	var hover := _box(Color(0.27, 0.21, 0.13, 0.92), C_BRASS_HI, 2, 6, 16)
+	var hover := _skin("button_hover", 14)
 	hover.content_margin_left = 30
 	b.add_theme_stylebox_override("normal", normal)
 	b.add_theme_stylebox_override("hover", hover)
@@ -1251,9 +1322,9 @@ func _option_button(text: String, group: ButtonGroup) -> Button:
 	b.toggle_mode = true
 	b.button_group = group
 	b.focus_mode = Control.FOCUS_NONE
-	b.add_theme_stylebox_override("normal", _box(C_BG2, Color(C_BRASS, 0.35), 1, 8, 10))
-	b.add_theme_stylebox_override("hover", _box(Color(0.22, 0.18, 0.13), Color(C_BRASS, 0.8), 1, 8, 10))
-	var on := _box(Color(0.3, 0.23, 0.13), C_BRASS_HI, 3, 8, 10)
+	b.add_theme_stylebox_override("normal", _skin("card", 10))
+	b.add_theme_stylebox_override("hover", _skin("button_hover", 10))
+	var on := _skin("button_on", 10)
 	b.add_theme_stylebox_override("pressed", on)
 	b.add_theme_stylebox_override("hover_pressed", on)
 	b.add_theme_color_override("font_pressed_color", Color(1, 0.95, 0.8))
@@ -1267,7 +1338,7 @@ func _section(text: String) -> Label:
 
 func _build_setup() -> void:
 	setup_panel = PanelContainer.new()
-	setup_panel.add_theme_stylebox_override("panel", _box(Color(0.09, 0.075, 0.06, 0.96), C_BRASS, 2, 12, 26, 20))
+	setup_panel.add_theme_stylebox_override("panel", _skin("window", 26))
 	title_ui.add_child(setup_panel)
 	var v := _vbox(14)
 	setup_panel.add_child(v)
@@ -1323,11 +1394,7 @@ func _build_setup() -> void:
 	start.custom_minimum_size = Vector2(260, 54)
 	start.add_theme_font_override("font", f_title)
 	start.add_theme_font_size_override("font_size", 24)
-	start.add_theme_stylebox_override("normal", _box(Color(0.72, 0.55, 0.22), Color(1, 0.88, 0.55), 2, 8, 8, 6))
-	start.add_theme_stylebox_override("hover", _box(Color(0.82, 0.64, 0.28), Color(1, 0.93, 0.7), 2, 8, 8, 6))
-	start.add_theme_stylebox_override("pressed", _box(Color(0.58, 0.43, 0.16), Color(1, 0.88, 0.55), 2, 8, 8, 2))
-	for k in ["font_color", "font_hover_color", "font_pressed_color"]:
-		start.add_theme_color_override(k, Color(0.16, 0.1, 0.04))
+	_gold_button(start)
 	start.pressed.connect(func(): game.start_game(pick_nation, pick_size, pick_rivals))
 	row.add_child(start)
 	nation_cards[0].button_pressed = true
@@ -1384,7 +1451,7 @@ func _pick_size(key: String) -> void:
 
 func _build_settings() -> void:
 	settings_panel = PanelContainer.new()
-	settings_panel.add_theme_stylebox_override("panel", _box(Color(0.09, 0.075, 0.06, 0.96), C_BRASS, 2, 12, 26, 20))
+	settings_panel.add_theme_stylebox_override("panel", _skin("window", 26))
 	title_ui.add_child(settings_panel)
 	var v := _vbox(14)
 	settings_panel.add_child(v)
@@ -1488,14 +1555,16 @@ const CV_HOUSES := [Vector2(-0.34, -0.68), Vector2(0.34, -0.68), Vector2(-0.66, 
 const CV_VIEW := { "b_plate": 2.3, "b_townhall": 0.8, "b_granary": 0.8, "b_workshop": 0.8, "b_market": 0.8,
 	"b_school": 0.8, "b_scaffold": 0.8, "b_plot": 0.8, "b_house_a": 0.45, "b_house_b": 0.45 }
 const CV_PLATE_TOP := 0.1        # height of the board's grass surface
-const CV_EFFECT := { "granary": "+2 food every turn", "workshop": "+2 production every turn",
-	"market": "+3 gold every turn", "school": "+2 research every turn" }
+const CV_EFFECT := { "granary": "Stores grain for bad years  ·  10 jobs", "workshop": "+2 production  ·  60 jobs",
+	"market": "+3 gold  ·  60 jobs", "school": "+2 research  ·  20 jobs" }
 
 var cv: Control
 var cv_frame: PanelContainer
 var cv_swatch: ColorRect
 var cv_title: Label
 var cv_stats: HBoxContainer
+var cv_bars: HBoxContainer      # food and production bars under the name
+var cv_bottom: HBoxContainer    # current production + the build grid
 var cv_left: VBoxContainer
 var cv_right: VBoxContainer
 var cv_scene: Control
@@ -1518,47 +1587,72 @@ func _build_city_view() -> void:
 	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cv.add_child(dim)
 	cv_frame = PanelContainer.new()
-	cv_frame.add_theme_stylebox_override("panel", _box(Color(0.085, 0.072, 0.058, 0.97), C_BRASS, 2, 14, 16, 16))
+	cv_frame.add_theme_stylebox_override("panel", _skin("window", 18))
 	cv.add_child(cv_frame)
 	cv_frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	cv_frame.offset_left = 22
 	cv_frame.offset_top = 14
 	cv_frame.offset_right = -22
 	cv_frame.offset_bottom = -18
-	var v := _vbox(10)
+	var v := _vbox(8)
 	cv_frame.add_child(v)
-	# header: colour bar, name, stats, prev / next / close
-	var head := _hbox(14)
+	# header (4X city-screen style): ◀  NAME  ▶ centred, close on the right
+	var head := _hbox(12)
 	v.add_child(head)
 	cv_swatch = ColorRect.new()
-	cv_swatch.custom_minimum_size = Vector2(8, 44)
+	cv_swatch.custom_minimum_size = Vector2(8, 40)
 	cv_swatch.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	head.add_child(cv_swatch)
-	cv_title = _label("", 40, C_BRASS_HI, f_title)
-	head.add_child(cv_title)
 	cv_stats = _hbox(18)
+	cv_stats.custom_minimum_size = Vector2(420, 0)
 	head.add_child(cv_stats)
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	head.add_child(sp)
-	var prev := _button("< Prev", 0, "", "Previous city")
+	var prev := _button("<", 0, "", "Previous city")
+	prev.add_theme_font_override("font", f_title)
+	prev.add_theme_font_size_override("font_size", 26)
+	prev.custom_minimum_size = Vector2(44, 40)
 	prev.pressed.connect(func(): _cycle_city(-1))
 	head.add_child(prev)
-	var nxt := _button("Next >", 0, "", "Next city")
+	cv_title = _label("", 38, C_BRASS_HI, f_title)
+	cv_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cv_title.custom_minimum_size = Vector2(380, 0)
+	head.add_child(cv_title)
+	var nxt := _button(">", 0, "", "Next city")
+	nxt.add_theme_font_override("font", f_title)
+	nxt.add_theme_font_size_override("font_size", 26)
+	nxt.custom_minimum_size = Vector2(44, 40)
 	nxt.pressed.connect(func(): _cycle_city(1))
 	head.add_child(nxt)
+	var sp2 := Control.new()
+	sp2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sp2.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head.add_child(sp2)
 	var close := _button("Close  [Esc]")
+	var close_box := HBoxContainer.new()
+	close_box.alignment = BoxContainer.ALIGNMENT_END
+	close_box.custom_minimum_size = Vector2(420 + 20, 0)
+	close.custom_minimum_size = Vector2(140, 40)
 	close.pressed.connect(close_city_view)
-	head.add_child(close)
+	close_box.add_child(close)
+	head.add_child(close_box)
+	# the two big bars: food and production
+	cv_bars = _hbox(16)
+	v.add_child(cv_bars)
 	v.add_child(_divider())
-	# body: info | diorama | buildings & production
+	# body: info | diorama | buildings
 	var body := _hbox(16)
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	v.add_child(body)
-	cv_left = _vbox(12)
-	cv_left.custom_minimum_size = Vector2(330, 0)
-	body.add_child(cv_left)
+	var lscroll := ScrollContainer.new()
+	lscroll.custom_minimum_size = Vector2(350, 0)
+	lscroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	body.add_child(lscroll)
+	cv_left = _vbox(10)
+	cv_left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lscroll.add_child(cv_left)
 	cv_scene = Control.new()
 	cv_scene.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cv_scene.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -1571,16 +1665,20 @@ func _build_city_view() -> void:
 		cv_scene.queue_redraw())
 	body.add_child(cv_scene)
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(360, 0)
+	scroll.custom_minimum_size = Vector2(330, 0)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	body.add_child(scroll)
 	cv_right = _vbox(8)
 	cv_right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(cv_right)
-	# warm "lamp light" behind the board
+	# bottom strip: what is being built + everything that can be built
+	v.add_child(_divider())
+	cv_bottom = _hbox(14)
+	v.add_child(cv_bottom)
+	# soft light behind the board
 	var g := Gradient.new()
-	g.set_color(0, Color(0.33, 0.27, 0.18))
-	g.set_color(1, Color(0.07, 0.06, 0.05))
+	g.set_color(0, Color(0.24, 0.32, 0.4, 0.85))
+	g.set_color(1, Color(0.04, 0.06, 0.09, 0.0))
 	cv_bg = GradientTexture2D.new()
 	cv_bg.gradient = g
 	cv_bg.fill = GradientTexture2D.FILL_RADIAL
@@ -1629,11 +1727,20 @@ func _update_city_view(force: bool) -> void:
 		close_city_view()
 		return
 	cv_city = c
-	var sig := [c["id"], c["build"], c["prod"], c["food"], c["pop"], c["blds"].size(), c["radius"], game.me()["gold"], game.turn]
+	var sig := [c["id"], c["build"], c["prod"], c["grain"], c["pop"], c["blds"].size(), c["radius"], game.me()["gold"], game.turn]
 	if force or sig != cv_sig:
 		cv_sig = sig
 		_rebuild_city_view()
 	cv_scene.queue_redraw()
+
+
+# One growth limit: green = fine, yellow = tight, red = blocking growth
+func _limit(icon_name: String, title: String, ok: bool, warn: bool, detail: String) -> Control:
+	var col := C_GOOD if ok else (Color(0.95, 0.8, 0.3) if warn else C_BAD)
+	var st := _stat(icon_name, title, col, 15)
+	st.tooltip_text = "%s: %s" % [title, detail]
+	st.mouse_filter = Control.MOUSE_FILTER_PASS
+	return st
 
 
 func _building_thumb(sname: String) -> Texture2D:
@@ -1664,63 +1771,63 @@ func _rebuild_city_view() -> void:
 	cv_swatch.color = game.ncol(0)
 	cv_title.text = city["name"]
 	_clear(cv_stats)
-	cv_stats.add_child(_stat("population", "Size %d" % city["pop"], C_TEXT, 18))
+	cv_stats.add_child(_stat("population", "%s people" % game.fmt_int(city["pop"]), C_TEXT, 18))
 	cv_stats.add_child(_stat("culture", "Borders %d" % city["radius"], C_DIM, 18))
 	cv_stats.add_child(_stat("city", "%d building%s" % [blds.size(), "" if blds.size() == 1 else "s"], C_DIM, 18))
-	# ---- left: growth, production, yields, citizens
-	_clear(cv_left)
-	var net: int = y["f"] - y["eat"]
-	var need: int = game.growth_need(city)
-	_section_title(cv_left, "Growth")
-	var gr := _hbox(8)
-	gr.add_child(_icon("food", 24))
-	gr.add_child(_bar(C_FOOD, city["food"], need, "Food %d / %d   (%+d)" % [city["food"], need, net]))
-	cv_left.add_child(gr)
-	var grow_txt := "Stagnant — needs more food."
-	if net > 0:
-		var t := _turns(need - city["food"], net)
-		grow_txt = "Grows to size %d in %d turn%s." % [city["pop"] + 1, t, "" if t == 1 else "s"]
-	elif net < 0:
-		grow_txt = "Starving! The city will shrink."
-	cv_left.add_child(_label(grow_txt, 15, C_BAD if net < 0 else C_DIM))
-	cv_left.add_child(_divider())
-	_section_title(cv_left, "Production")
+	# ---- the big bars
+	_clear(cv_bars)
+	var fb := _hbox(8)
+	fb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fb.add_child(_icon("food", 28))
+	var food_bar := _bar(C_FOOD if y["cov"] >= 1.0 else C_BAD, y["cov"] * 100.0, 100, _food_text(y))
+	food_bar.custom_minimum_size = Vector2(0, 28)
+	fb.add_child(food_bar)
+	cv_bars.add_child(fb)
+	var pbx := _hbox(8)
+	pbx.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pbx.add_child(_icon("production", 28))
 	var item: String = city["build"]
-	var pr := _hbox(10)
-	cv_left.add_child(pr)
-	var frame := PanelContainer.new()
-	frame.add_theme_stylebox_override("panel", _box(C_INSET, C_BRASS if item != "" else C_BAD, 1, 8, 2))
-	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var pic := TextureRect.new()
-	pic.texture = _thumb(item) if item != "" else null
-	pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	pic.custom_minimum_size = Vector2(70, 70)
-	frame.add_child(pic)
-	pr.add_child(frame)
-	var pv := _vbox(4)
-	pv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	pr.add_child(pv)
+	var prod_bar: ProgressBar
 	if item == "":
-		pv.add_child(_label("Nothing!", 22, C_BAD, f_title))
-		pv.add_child(_label("Pick something on the right or click an empty plot.", 14, C_DIM))
+		prod_bar = _bar(C_BAD.darkened(0.3), 0, 1, "Nothing is being built — pick something below")
 	else:
 		var cost: int = game.build_cost(item)
 		var turns := _turns(cost - city["prod"], y["p"])
-		pv.add_child(_label(game._item_name(item), 22, C_TEXT, f_title))
-		pv.add_child(_bar(C_PROD, city["prod"], cost, "%d / %d   ·   %d turn%s" % [city["prod"], cost, turns, "" if turns == 1 else "s"]))
-		var cost_g: int = maxi(0, (cost - int(city["prod"])) * 2)
-		var buy := _button("Buy now for %d gold   [G]" % cost_g, KEY_G, "gold")
-		if cost_g > game.me()["gold"]:
-			buy.disabled = true
-			buy.tooltip_text = "Not enough gold"
-		elif not game._can_complete(city, item):
-			buy.disabled = true
-			buy.tooltip_text = "A Colonist needs a city of size 2+"
-		cv_left.add_child(buy)
+		prod_bar = _bar(C_PROD, city["prod"], cost, "%s   %d / %d   (+%d)   ·   %d turn%s" % [game._item_name(item),
+			city["prod"], cost, y["p"], turns, "" if turns == 1 else "s"])
+	prod_bar.custom_minimum_size = Vector2(0, 28)
+	pbx.add_child(prod_bar)
+	cv_bars.add_child(pbx)
+	# ---- left: growth, production, yields, citizens
+	_clear(cv_left)
+	_section_title(cv_left, "People")
+	var ls: float = y["ls"]
+	var why := "income %d ÷ cost of living %d pesos" % [int(y["income"]), int(y["subsist"])]
+	if y["cov"] < 1.0: why += ", hunger"
+	if y["crowd"] > 0.0: why += ", − %.2f overcrowding" % y["crowd"]
+	var lsl := _label("Standard of living %.2f — %s   (%s)" % [ls, _ls_word(ls), why], 15, _ls_col(ls))
+	lsl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	cv_left.add_child(lsl)
+	var r: Dictionary = city.get("last", {})
+	if not r.is_empty():
+		var txt := "Last turn %+.1f%%:  +%s born  ·  −%s died  ·  +%s arrived  ·  −%s left" % [r["pct"],
+			game.fmt_int(r["births"]), game.fmt_int(r["deaths"]), game.fmt_int(r["imm"]), game.fmt_int(r["emi"])]
+		if r["plague"] > 0:
+			txt += "  ·  plague −%s" % game.fmt_int(r["plague"])
+		cv_left.add_child(_label(txt, 14, C_GOOD if r["change"] >= 0 else C_BAD))
+	# the four limits on growth: food, jobs, housing, health
+	var lim := _hbox(14)
+	var pop := float(city["pop"])
+	var hr: float = pop / float(y["housing"])
+	var unemp: float = y["unemp"]
+	lim.add_child(_limit("food", "Food", y["cov"] >= 1.0, y["cov"] >= 0.9, "%d%% fed" % int(y["cov"] * 100)))
+	lim.add_child(_limit("production", "Jobs", unemp < 0.05, unemp < 0.15, "%d%% idle" % int(unemp * 100)))
+	lim.add_child(_limit("city", "Housing", hr < 0.9, hr <= 1.0, "%s / %s" % [game.fmt_int(pop), game.fmt_int(y["housing"])]))
+	var vac: bool = game.me()["tech"]["vaccines"]
+	lim.add_child(_limit("research", "Health", vac or pop < 3000, pop < 8000, "plague %.1f%%/yr" % (200.0 * sqrt(pop / 5000.0) * (0.25 if vac else 1.0))))
+	cv_left.add_child(lim)
 	cv_left.add_child(_divider())
 	_section_title(cv_left, "Yields per turn")
-	var bf := 2 if "granary" in blds else 0
 	var bp := 2 if "workshop" in blds else 0
 	var bg := 3 if "market" in blds else 0
 	var bs := 2 if "school" in blds else 0
@@ -1729,26 +1836,39 @@ func _rebuild_city_view() -> void:
 	grid.add_theme_constant_override("h_separation", 12)
 	grid.add_theme_constant_override("v_separation", 4)
 	cv_left.add_child(grid)
-	for row in [["food", "%+d" % net, "land %d + buildings %d − eaten %d" % [y["f"] - bf, bf, y["eat"]], C_GOOD if net >= 0 else C_BAD],
-			["production", "+%d" % y["p"], "land %d + buildings %d" % [y["p"] - bp, bp], C_TEXT],
-			["gold", "+%d" % y["g"], "land %d + buildings %d" % [y["g"] - bg, bg], C_TEXT],
-			["research", "+%d" % y["sci"], "citizens %d + school %d" % [y["sci"] - bs, bs], C_TEXT]]:
+	var crops := []
+	for k in y["crops"].keys():
+		crops.append("%s %s" % [game.Econ.CROPS[k]["name"], game.fmt_int(y["crops"][k])])
+	for row in [["food", "%s t" % game.fmt_int(y["food"]), "a year: %s  ·  eaten %s t" % [", ".join(crops) if not crops.is_empty() else "nothing",
+				game.fmt_int(y["need"])], C_GOOD if y["cov"] >= 1.0 else C_BAD],
+			["production", "+%d" % y["p"], "town 1 + workers %d + buildings %d" % [y["p_land"], bp], C_TEXT],
+			["gold", "+%d" % y["g"], "taxes %d + other %d + buildings %d" % [y["tax"], y["g"] - y["tax"] - bg, bg], C_TEXT],
+			["research", "+%d" % y["sci"], "people %d + school %d" % [y["sci"] - bs, bs], C_TEXT]]:
 		grid.add_child(_icon(row[0], 22))
 		grid.add_child(_label(row[1], 18, row[3], f_bold))
 		grid.add_child(_label(row[2], 14, C_DIM))
 	cv_left.add_child(_divider())
-	_section_title(cv_left, "Citizens")
+	_section_title(cv_left, "Work")
 	var people := HFlowContainer.new()
 	people.add_theme_constant_override("h_separation", 2)
 	people.add_theme_constant_override("v_separation", 2)
-	for i in mini(city["pop"], 24):
+	for i in clampi(ceili(float(city["pop"]) / 500.0), 1, 24):
 		people.add_child(_icon("population", 22))
 	cv_left.add_child(people)
+	cv_left.add_child(_label("Workers %s of %s people  (one figure ≈ 500)" % [game.fmt_int(y["labor"]), game.fmt_int(city["pop"])], 14, C_DIM))
+	var wg := GridContainer.new()
+	wg.columns = 2
+	wg.add_theme_constant_override("h_separation", 16)
+	cv_left.add_child(wg)
+	for row in [["Farmers", y["farmers"]], ["Fishers", y["fishers"]], ["Woodcutters & miners", y["prod_workers"]],
+			["Trades & services", y["jobs"]], ["Idle", y["idle"]]]:
+		wg.add_child(_label(row[0], 14, C_BAD if row[0] == "Idle" and row[1] > 1.0 else C_TEXT))
+		wg.add_child(_label(game.fmt_int(row[1]), 14, C_TEXT, f_bold))
 	var owned := 0
 	for h in game.territory.keys():
 		if game.territory[h] == city["id"]:
 			owned += 1
-	cv_left.add_child(_label("%d working the land  ·  %d hexes inside the borders" % [y["worked"].size(), owned], 14, C_DIM))
+	cv_left.add_child(_label("%d of %d hexes inside the borders are worked" % [y["worked"].size(), owned], 14, C_DIM))
 	# ---- right: owned buildings, construction list, units
 	_clear(cv_right)
 	_section_title(cv_right, "Buildings")
@@ -1756,7 +1876,7 @@ func _rebuild_city_view() -> void:
 		cv_right.add_child(_label("No buildings yet — only the town hall and houses.", 15, C_DIM))
 	for b in blds:
 		var row := PanelContainer.new()
-		row.add_theme_stylebox_override("panel", _box(C_BG2, Color(C_GOOD, 0.5), 1, 8, 6))
+		row.add_theme_stylebox_override("panel", _skin("card", 7))
 		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var hb := _hbox(10)
 		row.add_child(hb)
@@ -1771,36 +1891,72 @@ func _rebuild_city_view() -> void:
 		tv.add_child(_label(CV_EFFECT.get(b, ""), 15, C_GOOD))
 		hb.add_child(tv)
 		cv_right.add_child(row)
-	cv_right.add_child(_divider())
-	_section_title(cv_right, "Construct")
+	# ---- bottom: current production (with Buy) and the build grid
+	_clear(cv_bottom)
+	var cur := PanelContainer.new()
+	cur.add_theme_stylebox_override("panel", _skin("inset", 8))
+	cur.custom_minimum_size = Vector2(330, 0)
+	cv_bottom.add_child(cur)
+	var ch := _hbox(10)
+	cur.add_child(ch)
+	var pic := TextureRect.new()
+	pic.texture = _thumb(item) if item != "" else null
+	pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	pic.custom_minimum_size = Vector2(76, 76)
+	pic.visible = item != ""
+	ch.add_child(pic)
+	var cvb := _vbox(4)
+	cvb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ch.add_child(cvb)
+	cvb.add_child(_label("Building" if item != "" else "Idle!", 14, C_DIM))
+	cvb.add_child(_label(game._item_name(item) if item != "" else "Nothing", 22, C_TEXT if item != "" else C_BAD, f_title))
+	if item != "":
+		var cost_g: int = maxi(0, (game.build_cost(item) - int(city["prod"])) * 2)
+		var buy := _button("Buy  %d gold   [G]" % cost_g, KEY_G, "gold")
+		if cost_g > game.me()["gold"]:
+			buy.disabled = true
+			buy.tooltip_text = "Not enough gold"
+		elif not game._can_complete(city, item):
+			buy.disabled = true
+			buy.tooltip_text = game.complete_problem(city, item)
+		cvb.add_child(buy)
+	var bgrid := HBoxContainer.new()
+	bgrid.add_theme_constant_override("separation", 8)
+	bgrid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bgrid.alignment = BoxContainer.ALIGNMENT_CENTER
+	cv_bottom.add_child(bgrid)
 	for i in game.BUILD_ORDER.size():
 		var key: String = game.BUILD_ORDER[i]
-		if game.BUILDINGS.has(key) and not (key in blds):
-			cv_right.add_child(_build_row(city, key, i, y))
-	_section_title(cv_right, "Train")
-	for i in game.BUILD_ORDER.size():
-		var key: String = game.BUILD_ORDER[i]
-		if game.UNITS.has(key):
-			cv_right.add_child(_build_row(city, key, i, y))
+		if not (key in blds):
+			bgrid.add_child(_build_tile(city, key, i, y))
 
 
-func _build_row(city: Dictionary, key: String, i: int, y: Dictionary) -> Button:
+# A square build button with a picture (the city screen's build grid)
+func _build_tile(city: Dictionary, key: String, i: int, y: Dictionary) -> Button:
 	var cost: int = game.build_cost(key)
 	var turns := _turns(cost - city["prod"], y["p"])
 	var desc: String = CV_EFFECT.get(key, "")
 	if game.UNITS.has(key):
-		desc = {"settler": "Founds a new city (size -1)", "worker": "Builds farms, mines, roads",
+		desc = {"settler": "Founds a new city with 150 people", "worker": "Builds farms, mines, roads",
 			"scout": "Explores; better village gifts", "guard": "Protects a city"}.get(key, "")
-	var b := _button("%s   ·   %d  ·  %d turn%s\n%s" % [game._item_name(key), cost, turns, "" if turns == 1 else "s", desc], KEY_1 + i)
+		if key != "settler":
+			desc += "  ·  %d people" % game.UNITS[key]["people"]
+		var why: String = game.complete_problem(city, key)
+		if why != "":
+			desc += "\n" + why
+	var b := _button("%s\n%d · %dt" % [game._item_name(key), cost, turns], KEY_1 + i)
 	b.icon = _thumb(key)
-	b.add_theme_constant_override("icon_max_width", 52)
-	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	b.custom_minimum_size = Vector2(340, 58)
-	b.add_theme_font_size_override("font_size", 15)
-	b.tooltip_text = "[%d]" % (i + 1)
+	b.expand_icon = true
+	b.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	b.vertical_icon_alignment = VERTICAL_ALIGNMENT_TOP
+	b.custom_minimum_size = Vector2(106, 112)
+	b.add_theme_constant_override("icon_max_width", 70)
+	b.add_theme_font_size_override("font_size", 14)
+	b.tooltip_text = "[%d]  %s — %d production, %d turn%s\n%s" % [i + 1, game._item_name(key), cost, turns, "" if turns == 1 else "s", desc]
 	if key == city["build"]:
-		b.add_theme_stylebox_override("normal", _box(Color(0.36, 0.28, 0.14), C_BRASS_HI, 2, 6, 7))
-		b.add_theme_stylebox_override("hover", _box(Color(0.42, 0.33, 0.17), C_BRASS_HI, 2, 6, 7))
+		b.add_theme_stylebox_override("normal", _skin("button_on", 7))
+		b.add_theme_stylebox_override("hover", _skin("button_on", 7))
 	return b
 
 
@@ -1839,7 +1995,7 @@ func _draw_city_scene() -> void:
 		var kind: String = "built" if b in blds else ("site" if city["build"] == b else "plot")
 		var spr: String = "b_" + b if kind == "built" else ("b_scaffold" if kind == "site" else "b_plot")
 		objs.append([CV_BUILD_SLOTS[b], b, spr, kind, b])
-	for i in mini(city["pop"], CV_HOUSES.size()):
+	for i in clampi(ceili(float(city["pop"]) / 500.0), 1, CV_HOUSES.size()):
 		objs.append([CV_HOUSES[i], "house%d" % i, "b_house_a" if i % 3 != 1 else "b_house_b", "house", ""])
 	objs.sort_custom(func(a, b): return a[0].y < b[0].y)
 	cv_objs.clear()
@@ -1886,7 +2042,7 @@ func _draw_city_scene() -> void:
 				sub = "The heart of %s" % city["name"]
 			"house":
 				title = "Houses"
-				sub = "One for each citizen (%d)" % city["pop"]
+				sub = "Home to %s people (room for %s)" % [game.fmt_int(city["pop"]), game.fmt_int(game.city_yield(city)["housing"])]
 			"built":
 				title = game._item_name(info[3])
 				sub = CV_EFFECT.get(info[3], "")
@@ -1905,7 +2061,7 @@ func _draw_city_scene() -> void:
 		var tw := maxf(font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x, font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x) + 24
 		var box := Rect2(g2.x - tw * 0.5, g2.y - r * 0.5 - 58, tw, 54)
 		box.position.x = clampf(box.position.x, 4, sz.x - tw - 4)
-		cv_scene.draw_style_box(_box(Color(0.07, 0.06, 0.05, 0.94), C_BRASS_HI, 1, 6, 0), box)
+		cv_scene.draw_style_box(_skin("tooltip", 0), box)
 		cv_scene.draw_string(f_title, box.position + Vector2(12, 24), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, C_BRASS_HI)
 		cv_scene.draw_string(font, box.position + Vector2(12, 45), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, C_TEXT)
 
